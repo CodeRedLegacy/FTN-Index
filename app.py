@@ -8,7 +8,6 @@ from collections import deque
 import re
 
 app = Flask(__name__)
-
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 score_history = deque(maxlen=7)
 
