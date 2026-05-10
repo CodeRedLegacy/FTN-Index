@@ -1,6 +1,6 @@
 import requests
 from bs4 import BeautifulSoup
-import openai
+import google.generativeai as genai
 import os
 from flask import Flask, jsonify
 import datetime
@@ -11,14 +11,17 @@ import logging
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-openai.api_key = os.environ.get("OPENAI_API_KEY")
+# Configure Gemini from environment variable
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+# Use Gemini Flash – free, fast, and sufficient for sentiment scoring
+model = genai.GenerativeModel('gemini-2.0-flash')
+
 score_history = deque(maxlen=7)
 
 def scrape_fed_speeches():
     try:
         url = "https://www.federalreserve.gov/newsevents/speeches.htm"
         response = requests.get(url, timeout=10)
-        # Explicitly use the html parser to avoid XML warnings
         soup = BeautifulSoup(response.text, 'html.parser')
         speeches = []
         for item in soup.select('a[href*="speech"]'):
@@ -36,21 +39,18 @@ def extract_text_from_speech(url):
     try:
         res = requests.get(url, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
-        # Try the <article> tag first
         article = soup.find('article')
         if article:
             text = article.get_text()
             logging.info(f"Extracted {len(text)} chars via <article> from {url[:60]}")
             return text[:4000]
 
-        # Fallback: common content div used by the Fed
         content_div = soup.find('div', id='content')
         if content_div:
             text = content_div.get_text()
             logging.info(f"Extracted {len(text)} chars via #content from {url[:60]}")
             return text[:4000]
 
-        # Last resort: entire body text
         body = soup.find('body')
         if body:
             text = body.get_text()
@@ -73,13 +73,9 @@ Text:
 {text}
 """
     try:
-        response = openai.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=5
-        )
-        score_str = response.choices[0].message.content.strip()
+        # Gemini API call – free tier, identical prompt
+        response = model.generate_content(prompt)
+        score_str = response.text.strip()
         digits = re.findall(r'\d+', score_str)
         if digits:
             score = int(digits[0])
@@ -88,7 +84,7 @@ Text:
         else:
             logging.warning(f"No digits in AI response: {score_str}")
     except Exception as e:
-        logging.error(f"OpenAI API error: {e}")
+        logging.error(f"Gemini API error: {e}")
     return None
 
 def compute_daily_ftn():
