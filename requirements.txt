@@ -2,4 +2,4 @@ flask
 gunicorn
 requests
 beautifulsoup4
-openai
+google-generativeai
