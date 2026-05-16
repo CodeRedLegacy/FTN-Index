@@ -2,6 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import os
 from flask import Flask, jsonify
+from flask_cors import CORS
 import datetime
 from collections import deque
 import re
@@ -9,6 +10,7 @@ import logging
 from google import genai
 
 app = Flask(__name__)
+CORS(app)  # Allow all origins (your GitHub Pages dashboard)
 logging.basicConfig(level=logging.INFO)
 
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
@@ -68,7 +70,7 @@ Text:
 """
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",  # ← Updated model name
+            model="gemini-2.5-flash",
             contents=prompt,
             config={
                 "temperature": 0,
