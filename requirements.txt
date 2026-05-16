@@ -1,1 +1,6 @@
-
+flask
+gunicorn
+requests
+beautifulsoup4
+groq
+flask-cors
