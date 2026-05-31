@@ -2,6 +2,6 @@ flask
 gunicorn
 requests
 beautifulsoup4
-google-genai
 groq
 flask-cors
+google-genai
