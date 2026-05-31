@@ -9,9 +9,14 @@ import re
 import logging
 
 # ---------- AI PROVIDERS ----------
-# Groq (primary)
+# Groq (primary) – only initialize if the key is set
 from groq import Groq
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+groq_client = None
+if GROQ_API_KEY and GROQ_API_KEY.strip():
+    groq_client = Groq(api_key=GROQ_API_KEY)
+else:
+    logging.warning("GROQ_API_KEY is empty or missing; Groq will be skipped.")
 
 # Gemini (fallback) – new SDK
 from google import genai
@@ -105,22 +110,25 @@ Text:
 {text[:3000]}
 """
 
-    # ---------- Tier 1: Groq ----------
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
-            temperature=0,
-            max_tokens=5
-        )
-        score_str = chat_completion.choices[0].message.content.strip()
-        digits = re.findall(r'\d+', score_str)
-        if digits:
-            score = int(digits[0])
-            logging.info(f"AI score (Groq): {score}")
-            return max(0, min(100, score))
-    except Exception as e:
-        logging.warning(f"Groq failed ({e}), falling back to Gemini-1...")
+    # ---------- Tier 1: Groq (if available) ----------
+    if groq_client:
+        try:
+            chat_completion = groq_client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.1-8b-instant",
+                temperature=0,
+                max_tokens=5
+            )
+            score_str = chat_completion.choices[0].message.content.strip()
+            digits = re.findall(r'\d+', score_str)
+            if digits:
+                score = int(digits[0])
+                logging.info(f"AI score (Groq): {score}")
+                return max(0, min(100, score))
+        except Exception as e:
+            logging.warning(f"Groq failed ({e}), falling back to Gemini-1...")
+    else:
+        logging.info("Groq key not configured, skipping to Gemini...")
 
     # ---------- Tier 2: Gemini Key 1 ----------
     if GEMINI_KEY_1:
