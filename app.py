@@ -7,22 +7,24 @@ import datetime
 from collections import deque
 import re
 import logging
+
+# ---------- AI PROVIDERS ----------
+# Groq (primary)
 from groq import Groq
-import google.generativeai as genai
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+
+# Gemini (fallback) – new SDK
+from google import genai
+GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
+GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2")
 
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-# Primary AI client (Groq)
-client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-
-# Gemini fallback keys
-GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
-GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2")
-
 score_history = deque(maxlen=7)
 
+# ---------- SCRAPING HELPERS ----------
 def fetch_soup(url, timeout=10):
     r = requests.get(url, timeout=timeout)
     return BeautifulSoup(r.text, 'html.parser')
@@ -37,6 +39,7 @@ def extract_text(soup):
             return tag.get_text()[:4000]
     return ""
 
+# ---------- SOURCE SCRAPERS ----------
 def scrape_fed_speeches():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
@@ -90,18 +93,21 @@ def scrape_fomc_minutes():
         logging.error(f"FOMC minutes scrape error: {e}")
         return []
 
+# ---------- AI SCORING (with full fallback chain) ----------
 def score_text_with_ai(text):
     if not text:
         return None
+
     prompt = f"""
 You are a Federal Reserve communication analyzer. Rate the following text on a scale from 0 (extremely dovish, suggesting rate cuts/easing) to 100 (extremely hawkish, suggesting rate hikes/tightening). Return ONLY the number, no explanation.
 
 Text:
 {text[:3000]}
 """
+
     # ---------- Tier 1: Groq ----------
     try:
-        chat_completion = client.chat.completions.create(
+        chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
             temperature=0,
@@ -119,11 +125,11 @@ Text:
     # ---------- Tier 2: Gemini Key 1 ----------
     if GEMINI_KEY_1:
         try:
-            genai.configure(api_key=GEMINI_KEY_1)
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0, "max_output_tokens": 5}
+            gemini_client = genai.Client(api_key=GEMINI_KEY_1)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={"temperature": 0, "max_output_tokens": 5}
             )
             score_str = response.text.strip()
             digits = re.findall(r'\d+', score_str)
@@ -137,11 +143,11 @@ Text:
     # ---------- Tier 3: Gemini Key 2 ----------
     if GEMINI_KEY_2:
         try:
-            genai.configure(api_key=GEMINI_KEY_2)
-            model = genai.GenerativeModel('gemini-2.5-flash')
-            response = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0, "max_output_tokens": 5}
+            gemini_client = genai.Client(api_key=GEMINI_KEY_2)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={"temperature": 0, "max_output_tokens": 5}
             )
             score_str = response.text.strip()
             digits = re.findall(r'\d+', score_str)
@@ -153,6 +159,11 @@ Text:
             logging.error(f"All AI providers failed: {e}")
             return None
 
+    # If Gemini keys are missing entirely
+    logging.error("No Gemini API keys configured")
+    return None
+
+# ---------- COMBINED PIPELINE ----------
 def compute_daily_ftn():
     all_sources = []
     all_sources.extend(scrape_fed_speeches())
@@ -199,6 +210,7 @@ def compute_daily_ftn():
 
     return smoothed, confidence, sources_detail
 
+# ---------- ROUTES ----------
 @app.route('/health')
 def health():
     return "OK"
