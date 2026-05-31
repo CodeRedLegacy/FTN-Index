@@ -22,6 +22,7 @@ else:
 from google import genai
 GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
 GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2")
+GEMINI_KEY_3 = os.environ.get("GEMINI_API_KEY_3")
 
 app = Flask(__name__)
 CORS(app)
@@ -164,6 +165,24 @@ Text:
                 logging.info(f"AI score (Gemini-2): {score}")
                 return max(0, min(100, score))
         except Exception as e:
+            logging.warning(f"Gemini-2 failed ({e}), falling back to Gemini-3...")
+
+    # ---------- Tier 4: Gemini Key 3 ----------
+    if GEMINI_KEY_3:
+        try:
+            gemini_client = genai.Client(api_key=GEMINI_KEY_3)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={"temperature": 0, "max_output_tokens": 5}
+            )
+            score_str = response.text.strip()
+            digits = re.findall(r'\d+', score_str)
+            if digits:
+                score = int(digits[0])
+                logging.info(f"AI score (Gemini-3): {score}")
+                return max(0, min(100, score))
+        except Exception as e:
             logging.error(f"All AI providers failed: {e}")
             return None
 
@@ -243,10 +262,7 @@ def ftn_latest():
 
     prev = list(score_history)
     change = round(score - prev[-2], 1) if len(prev) > 1 else 0
-
-    # Grab the most recent raw (unsmoothed) score from the history
     raw_score = prev[-1] if prev else score
-
     ts = datetime.datetime.utcnow().isoformat() + "Z"
 
     return jsonify({
