@@ -9,7 +9,6 @@ import re
 import logging
 
 # ---------- AI PROVIDERS ----------
-# Groq (primary) – only initialize if the key is set
 from groq import Groq
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = None
@@ -18,7 +17,6 @@ if GROQ_API_KEY and GROQ_API_KEY.strip():
 else:
     logging.warning("GROQ_API_KEY is empty or missing; Groq will be skipped.")
 
-# Gemini (fallback) – new SDK
 from google import genai
 GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
 GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2")
@@ -30,7 +28,7 @@ logging.basicConfig(level=logging.INFO)
 
 score_history = deque(maxlen=7)
 
-# ---------- SCRAPING HELPERS ----------
+# ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
     r = requests.get(url, timeout=timeout)
     return BeautifulSoup(r.text, 'html.parser')
@@ -45,24 +43,45 @@ def extract_text(soup):
             return tag.get_text()[:4000]
     return ""
 
-# ---------- SOURCE SCRAPERS (FIXED) ----------
+def is_list_page(url):
+    """Return True if the URL looks like an index/list page, not an individual document."""
+    list_markers = [
+        'speeches-testimony.htm', 'speeches.htm', 'pressreleases.htm',
+        '2026-speeches.htm', '2026-press-fomc.htm', 'fomcminutes.htm',
+        'pressreleases.htm', 'monetarypolicy/fomcminutes',
+        '/newsevents/2026-',  # yearly list pages
+    ]
+    for marker in list_markers:
+        if marker in url:
+            return True
+    return False
+
+# ---------- SOURCE SCRAPERS (BROADER SELECTORS) ----------
 def scrape_fed_speeches():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
-        # Select links that point to actual speech pages (not list pages)
-        # Speeches typically have URLs like /newsevents/speech/2026/speaker20260515a.htm
-        items = soup.select('a[href*="/newsevents/speech/"]')
+        # Try multiple patterns: individual speech pages often contain the year and end in .htm
+        patterns = [
+            'a[href*="/speech/"]',      # /newsevents/speech/2026/...
+            'a[href*="speech"]',         # broader catch-all
+            'a[href$="a.htm"]',          # many speech pages end like ...0515a.htm
+        ]
         sources = []
-        for a in items[:3]:
-            href = a.get('href')
-            if href:
-                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                # Skip any list pages or index pages that might slip through
-                if full_url.endswith('.xml') or 'speeches-testimony' in full_url or 'speeches.htm' in full_url:
-                    continue
-                title = a.get_text(strip=True) or "Speech"
-                sources.append({'type': 'speech', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} speech links (individual speeches)")
+        for pattern in patterns:
+            if len(sources) >= 3:
+                break
+            for a in soup.select(pattern):
+                if len(sources) >= 3:
+                    break
+                href = a.get('href')
+                if href:
+                    full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                    if is_list_page(full_url) or full_url.endswith('.xml'):
+                        continue
+                    title = a.get_text(strip=True) or "Speech"
+                    if not any(s['url'] == full_url for s in sources):
+                        sources.append({'type': 'speech', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} speech links")
         return sources
     except Exception as e:
         logging.error(f"Speeches scrape error: {e}")
@@ -71,19 +90,26 @@ def scrape_fed_speeches():
 def scrape_fomc_statements():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/pressreleases.htm")
-        # FOMC statements are individual press release pages, e.g., /newsevents/pressreleases/20260515a.htm
-        items = soup.select('a[href*="/newsevents/pressrelease"]')
+        patterns = [
+            'a[href*="pressrelease"]',
+            'a[href$="a.htm"]',
+        ]
         sources = []
-        for a in items[:2]:
-            href = a.get('href')
-            if href:
-                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                # Exclude list pages
-                if 'pressreleases.htm' in full_url or '2026-press-fomc.htm' in full_url:
-                    continue
-                title = a.get_text(strip=True) or "FOMC Statement"
-                sources.append({'type': 'fomc_statement', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} FOMC statement links (individual statements)")
+        for pattern in patterns:
+            if len(sources) >= 2:
+                break
+            for a in soup.select(pattern):
+                if len(sources) >= 2:
+                    break
+                href = a.get('href')
+                if href:
+                    full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                    if is_list_page(full_url):
+                        continue
+                    title = a.get_text(strip=True) or "FOMC Statement"
+                    if not any(s['url'] == full_url for s in sources):
+                        sources.append({'type': 'fomc_statement', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} FOMC statement links")
         return sources
     except Exception as e:
         logging.error(f"FOMC statements scrape error: {e}")
@@ -92,37 +118,41 @@ def scrape_fomc_statements():
 def scrape_fomc_minutes():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm")
-        # Minutes are individual pages, e.g., /monetarypolicy/fomcminutes20260515.htm
-        items = soup.select('a[href*="/monetarypolicy/fomcminutes"]')
+        patterns = [
+            'a[href*="fomcminutes"]',
+            'a[href$="a.htm"]',
+        ]
         sources = []
-        for a in items[:1]:
-            href = a.get('href')
-            if href:
-                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                # Exclude the list page itself
-                if 'fomcminutes.htm' in full_url:
-                    continue
-                title = a.get_text(strip=True) or "FOMC Minutes"
-                sources.append({'type': 'fomc_minutes', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} FOMC minutes links (individual minutes)")
+        for pattern in patterns:
+            if len(sources) >= 1:
+                break
+            for a in soup.select(pattern):
+                if len(sources) >= 1:
+                    break
+                href = a.get('href')
+                if href:
+                    full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                    if is_list_page(full_url):
+                        continue
+                    title = a.get_text(strip=True) or "FOMC Minutes"
+                    if not any(s['url'] == full_url for s in sources):
+                        sources.append({'type': 'fomc_minutes', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} FOMC minutes links")
         return sources
     except Exception as e:
         logging.error(f"FOMC minutes scrape error: {e}")
         return []
 
-# ---------- AI SCORING (with full fallback chain) ----------
+# ---------- AI SCORING ----------
 def score_text_with_ai(text):
     if not text:
         return None
-
     prompt = f"""
 You are a Federal Reserve communication analyzer. Rate the following text on a scale from 0 (extremely dovish, suggesting rate cuts/easing) to 100 (extremely hawkish, suggesting rate hikes/tightening). Return ONLY the number, no explanation.
 
 Text:
 {text[:3000]}
 """
-
-    # ---------- Tier 1: Groq (if available) ----------
     if groq_client:
         try:
             chat_completion = groq_client.chat.completions.create(
@@ -141,8 +171,6 @@ Text:
             logging.warning(f"Groq failed ({e}), falling back to Gemini-1...")
     else:
         logging.info("Groq key not configured, skipping to Gemini...")
-
-    # ---------- Tier 2: Gemini Key 1 ----------
     if GEMINI_KEY_1:
         try:
             gemini_client = genai.Client(api_key=GEMINI_KEY_1)
@@ -159,8 +187,6 @@ Text:
                 return max(0, min(100, score))
         except Exception as e:
             logging.warning(f"Gemini-1 failed ({e}), falling back to Gemini-2...")
-
-    # ---------- Tier 3: Gemini Key 2 ----------
     if GEMINI_KEY_2:
         try:
             gemini_client = genai.Client(api_key=GEMINI_KEY_2)
@@ -177,8 +203,6 @@ Text:
                 return max(0, min(100, score))
         except Exception as e:
             logging.warning(f"Gemini-2 failed ({e}), falling back to Gemini-3...")
-
-    # ---------- Tier 4: Gemini Key 3 ----------
     if GEMINI_KEY_3:
         try:
             gemini_client = genai.Client(api_key=GEMINI_KEY_3)
@@ -196,7 +220,6 @@ Text:
         except Exception as e:
             logging.error(f"All AI providers failed: {e}")
             return None
-
     logging.error("No Gemini API keys configured")
     return None
 
@@ -206,11 +229,9 @@ def compute_daily_ftn():
     all_sources.extend(scrape_fed_speeches())
     all_sources.extend(scrape_fomc_statements())
     all_sources.extend(scrape_fomc_minutes())
-
     scores = []
     total_chars = 0
     sources_detail = []
-
     for src in all_sources:
         try:
             soup = fetch_soup(src['url'])
@@ -229,14 +250,11 @@ def compute_daily_ftn():
                     logging.info(f"Scored {src['type']}: {score}")
         except Exception as e:
             logging.error(f"Error processing {src['url']}: {e}")
-
     if not scores:
         return None, None, []
-
     raw = sum(scores) / len(scores)
     score_history.append(raw)
     smoothed = round(sum(score_history) / len(score_history), 1)
-
     num_sources = len(sources_detail)
     if num_sources >= 4 and total_chars > 8000:
         confidence = "HIGH"
@@ -244,7 +262,6 @@ def compute_daily_ftn():
         confidence = "MEDIUM"
     else:
         confidence = "LOW"
-
     return smoothed, confidence, sources_detail
 
 # ---------- ROUTES ----------
@@ -258,23 +275,17 @@ def ping():
     if score is None:
         return jsonify({"status": "error", "message": "No data"}), 500
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({
-        "status": "ok",
-        "score": score,
-        "timestamp": ts
-    })
+    return jsonify({"status": "ok", "score": score, "timestamp": ts})
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
     score, confidence, sources = compute_daily_ftn()
     if score is None:
         return jsonify({"error": "No data available"}), 500
-
     prev = list(score_history)
     change = round(score - prev[-2], 1) if len(prev) > 1 else 0
     raw_score = prev[-1] if prev else score
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-
     return jsonify({
         "index": "F-Tone (FTN)",
         "score": score,
