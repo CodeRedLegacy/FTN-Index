@@ -45,21 +45,24 @@ def extract_text(soup):
             return tag.get_text()[:4000]
     return ""
 
-# ---------- SOURCE SCRAPERS ----------
+# ---------- SOURCE SCRAPERS (FIXED) ----------
 def scrape_fed_speeches():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
-        items = soup.select('a[href*="speech"]')
+        # Select links that point to actual speech pages (not list pages)
+        # Speeches typically have URLs like /newsevents/speech/2026/speaker20260515a.htm
+        items = soup.select('a[href*="/newsevents/speech/"]')
         sources = []
         for a in items[:3]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                if full_url.endswith('.xml'):
+                # Skip any list pages or index pages that might slip through
+                if full_url.endswith('.xml') or 'speeches-testimony' in full_url or 'speeches.htm' in full_url:
                     continue
-                title = a.get_text(strip=True)
+                title = a.get_text(strip=True) or "Speech"
                 sources.append({'type': 'speech', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} speech links")
+        logging.info(f"Scraped {len(sources)} speech links (individual speeches)")
         return sources
     except Exception as e:
         logging.error(f"Speeches scrape error: {e}")
@@ -68,15 +71,19 @@ def scrape_fed_speeches():
 def scrape_fomc_statements():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/pressreleases.htm")
-        items = soup.select('a[href*="pressrelease"]')
+        # FOMC statements are individual press release pages, e.g., /newsevents/pressreleases/20260515a.htm
+        items = soup.select('a[href*="/newsevents/pressrelease"]')
         sources = []
         for a in items[:2]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                title = a.get_text(strip=True)
+                # Exclude list pages
+                if 'pressreleases.htm' in full_url or '2026-press-fomc.htm' in full_url:
+                    continue
+                title = a.get_text(strip=True) or "FOMC Statement"
                 sources.append({'type': 'fomc_statement', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} FOMC statement links")
+        logging.info(f"Scraped {len(sources)} FOMC statement links (individual statements)")
         return sources
     except Exception as e:
         logging.error(f"FOMC statements scrape error: {e}")
@@ -85,15 +92,19 @@ def scrape_fomc_statements():
 def scrape_fomc_minutes():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm")
-        items = soup.select('a[href*="fomcminutes"]')
+        # Minutes are individual pages, e.g., /monetarypolicy/fomcminutes20260515.htm
+        items = soup.select('a[href*="/monetarypolicy/fomcminutes"]')
         sources = []
         for a in items[:1]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                title = a.get_text(strip=True)
+                # Exclude the list page itself
+                if 'fomcminutes.htm' in full_url:
+                    continue
+                title = a.get_text(strip=True) or "FOMC Minutes"
                 sources.append({'type': 'fomc_minutes', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} FOMC minutes links")
+        logging.info(f"Scraped {len(sources)} FOMC minutes links (individual minutes)")
         return sources
     except Exception as e:
         logging.error(f"FOMC minutes scrape error: {e}")
@@ -186,7 +197,6 @@ Text:
             logging.error(f"All AI providers failed: {e}")
             return None
 
-    # If Gemini keys are missing entirely
     logging.error("No Gemini API keys configured")
     return None
 
