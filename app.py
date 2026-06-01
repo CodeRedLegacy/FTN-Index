@@ -43,41 +43,46 @@ def extract_text(soup):
             return tag.get_text()[:4000]
     return ""
 
-def is_list_page(url):
-    """Return True if the URL looks like an index/list page, not an individual document."""
-    list_markers = [
-        'speeches-testimony.htm', 'speeches.htm', 'pressreleases.htm',
-        '2026-speeches.htm', '2026-press-fomc.htm', 'fomcminutes.htm',
-        'pressreleases.htm', 'monetarypolicy/fomcminutes',
-        '/newsevents/2026-',  # yearly list pages
+def looks_like_individual_doc(url):
+    """
+    Return True if the URL looks like an individual speech/statement/minute,
+    not a yearly archive, FOIA page, or other non-document page.
+    """
+    # Exclude known non-document pages
+    exclude_keywords = [
+        'foia', 'rss', 'feeds', '.xml', 'speeches.htm',
+        'pressreleases.htm', 'fomcminutes.htm',
     ]
-    for marker in list_markers:
-        if marker in url:
-            return True
+    for kw in exclude_keywords:
+        if kw in url:
+            return False
+
+    # Individual speech pages often contain a date pattern like /speech/2026/speaker20260515a.htm
+    # or /newsevents/pressreleases/20260515a.htm
+    # They typically have a month-like abbreviation or a digit-letter ending
+    if re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', url, re.IGNORECASE):
+        return True
+    if re.search(r'\d{4,}[a-z]\.htm', url, re.IGNORECASE):  # e.g. 20260515a.htm
+        return True
+    if re.search(r'\d{4,}press\.htm', url, re.IGNORECASE):  # yearly press release list
+        return False
     return False
 
-# ---------- SOURCE SCRAPERS (BROADER SELECTORS) ----------
+# ---------- SOURCE SCRAPERS (CONTENT‑AREA ONLY) ----------
 def scrape_fed_speeches():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
-        # Try multiple patterns: individual speech pages often contain the year and end in .htm
-        patterns = [
-            'a[href*="/speech/"]',      # /newsevents/speech/2026/...
-            'a[href*="speech"]',         # broader catch-all
-            'a[href$="a.htm"]',          # many speech pages end like ...0515a.htm
-        ]
+        # Only search inside the main content area
+        content = soup.find('div', id='content') or soup
+        items = content.select('a[href*="speech"]')
         sources = []
-        for pattern in patterns:
+        for a in items:
             if len(sources) >= 3:
                 break
-            for a in soup.select(pattern):
-                if len(sources) >= 3:
-                    break
-                href = a.get('href')
-                if href:
-                    full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                    if is_list_page(full_url) or full_url.endswith('.xml'):
-                        continue
+            href = a.get('href')
+            if href:
+                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                if looks_like_individual_doc(full_url):
                     title = a.get_text(strip=True) or "Speech"
                     if not any(s['url'] == full_url for s in sources):
                         sources.append({'type': 'speech', 'title': title, 'url': full_url})
@@ -90,22 +95,16 @@ def scrape_fed_speeches():
 def scrape_fomc_statements():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/newsevents/pressreleases.htm")
-        patterns = [
-            'a[href*="pressrelease"]',
-            'a[href$="a.htm"]',
-        ]
+        content = soup.find('div', id='content') or soup
+        items = content.select('a[href*="pressrelease"]')
         sources = []
-        for pattern in patterns:
+        for a in items:
             if len(sources) >= 2:
                 break
-            for a in soup.select(pattern):
-                if len(sources) >= 2:
-                    break
-                href = a.get('href')
-                if href:
-                    full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                    if is_list_page(full_url):
-                        continue
+            href = a.get('href')
+            if href:
+                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                if looks_like_individual_doc(full_url):
                     title = a.get_text(strip=True) or "FOMC Statement"
                     if not any(s['url'] == full_url for s in sources):
                         sources.append({'type': 'fomc_statement', 'title': title, 'url': full_url})
@@ -118,22 +117,16 @@ def scrape_fomc_statements():
 def scrape_fomc_minutes():
     try:
         soup = fetch_soup("https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm")
-        patterns = [
-            'a[href*="fomcminutes"]',
-            'a[href$="a.htm"]',
-        ]
+        content = soup.find('div', id='content') or soup
+        items = content.select('a[href*="fomcminutes"]')
         sources = []
-        for pattern in patterns:
+        for a in items:
             if len(sources) >= 1:
                 break
-            for a in soup.select(pattern):
-                if len(sources) >= 1:
-                    break
-                href = a.get('href')
-                if href:
-                    full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                    if is_list_page(full_url):
-                        continue
+            href = a.get('href')
+            if href:
+                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                if looks_like_individual_doc(full_url):
                     title = a.get_text(strip=True) or "FOMC Minutes"
                     if not any(s['url'] == full_url for s in sources):
                         sources.append({'type': 'fomc_minutes', 'title': title, 'url': full_url})
@@ -143,7 +136,7 @@ def scrape_fomc_minutes():
         logging.error(f"FOMC minutes scrape error: {e}")
         return []
 
-# ---------- AI SCORING ----------
+# ---------- AI SCORING (unchanged) ----------
 def score_text_with_ai(text):
     if not text:
         return None
