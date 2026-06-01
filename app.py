@@ -44,32 +44,46 @@ def extract_text(soup):
     return ""
 
 def get_current_year_archive(main_soup, base_url, keyword):
-    """
-    From the main listing page, find the link to the current year's archive.
-    e.g., 2026-speeches.htm, 2026-press.htm, fomcminutes2026.htm
-    """
     current_year = str(datetime.datetime.utcnow().year)
     for a in main_soup.select('a[href]'):
         href = a.get('href')
         if href and keyword in href and current_year in href:
             full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
             return full_url
-    # Fallback: return the main page itself (but this will likely fail)
     return base_url
 
 def looks_like_individual_doc(url):
-    """Return True if the URL looks like an individual document, not a list/archive."""
-    # Exclude known non-document pages
     if any(kw in url for kw in ['foia', 'rss', '.xml', 'speeches.htm', 'pressreleases.htm', 'fomcminutes.htm']):
         return False
-    # Individual pages often contain a date-like pattern, e.g., /speech/2026/bowman20260514a.htm
-    # Or pressreleases/20260515a.htm
-    # They usually have a month abbreviation or a digit+letter ending
     if re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', url, re.IGNORECASE):
+        return True
+    if re.search(r'\d{8}', url):
         return True
     if re.search(r'\d{4,}[a-z]\.htm', url, re.IGNORECASE):
         return True
     return False
+
+def extract_speaker_from_url(url):
+    """Extract a readable speaker name from a Fed document URL."""
+    # Speeches: .../speech/powell20260531a.htm  ->  Powell
+    m = re.search(r'/([a-z]+?)\d{8,}a?\.htm', url, re.IGNORECASE)
+    if m:
+        name = m.group(1).capitalize()
+        # Common Fed governor names
+        known = {
+            'Powell': 'Powell', 'Bowman': 'Bowman', 'Jefferson': 'Jefferson',
+            'Waller': 'Waller', 'Warsh': 'Warsh', 'Brainard': 'Brainard',
+            'Clarida': 'Clarida', 'Quarles': 'Quarles', 'Logan': 'Logan',
+            'Mester': 'Mester', 'Williams': 'Williams', 'Bostic': 'Bostic',
+            'Harker': 'Harker', 'Kashkari': 'Kashkari', 'George': 'George',
+            'Bullard': 'Bullard', 'Evans': 'Evans', 'Rosengren': 'Rosengren',
+            'Kaplan': 'Kaplan', 'Daly': 'Daly', 'Barkin': 'Barkin',
+        }
+        return known.get(name, name)
+    # FOMC statements/minutes
+    if 'monetary' in url or 'fomc' in url.lower():
+        return 'FOMC'
+    return 'Fed'
 
 # ---------- SOURCE SCRAPERS (TWO-STEP) ----------
 def scrape_fed_speeches():
@@ -80,7 +94,6 @@ def scrape_fed_speeches():
                                                "-speeches")
         logging.info(f"Using speech archive: {archive_url}")
         soup = fetch_soup(archive_url)
-        # Look for links containing '/speech/' (individual speech pages)
         items = soup.select('a[href*="/speech/"]')
         sources = []
         for a in items:
@@ -133,7 +146,7 @@ def scrape_fomc_minutes():
                                                "fomcminutes")
         logging.info(f"Using minutes archive: {archive_url}")
         soup = fetch_soup(archive_url)
-        items = soup.select('a[href*="/fomcminutes"]')
+        items = soup.select('a[href*="fomcminutes"]')
         sources = []
         for a in items:
             if len(sources) >= 1:
@@ -151,7 +164,7 @@ def scrape_fomc_minutes():
         logging.error(f"FOMC minutes scrape error: {e}")
         return []
 
-# ---------- AI SCORING (unchanged) ----------
+# ---------- AI SCORING ----------
 def score_text_with_ai(text):
     if not text:
         return None
@@ -249,11 +262,14 @@ def compute_daily_ftn():
                 if score is not None:
                     scores.append(score)
                     total_chars += len(text)
+                    # Add speaker name from URL
+                    speaker = extract_speaker_from_url(src['url'])
                     sources_detail.append({
                         'type': src['type'],
                         'title': src['title'],
                         'url': src['url'],
-                        'chars': len(text)
+                        'chars': len(text),
+                        'speaker': speaker
                     })
                     logging.info(f"Scored {src['type']}: {score}")
         except Exception as e:
