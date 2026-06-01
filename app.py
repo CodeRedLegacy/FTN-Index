@@ -43,38 +43,45 @@ def extract_text(soup):
             return tag.get_text()[:4000]
     return ""
 
-def looks_like_individual_doc(url):
+def get_current_year_archive(main_soup, base_url, keyword):
     """
-    Return True if the URL looks like an individual speech/statement/minute,
-    not a yearly archive, FOIA page, or other non-document page.
+    From the main listing page, find the link to the current year's archive.
+    e.g., 2026-speeches.htm, 2026-press.htm, fomcminutes2026.htm
     """
-    # Exclude known non-document pages
-    exclude_keywords = [
-        'foia', 'rss', 'feeds', '.xml', 'speeches.htm',
-        'pressreleases.htm', 'fomcminutes.htm',
-    ]
-    for kw in exclude_keywords:
-        if kw in url:
-            return False
+    current_year = str(datetime.datetime.utcnow().year)
+    for a in main_soup.select('a[href]'):
+        href = a.get('href')
+        if href and keyword in href and current_year in href:
+            full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+            return full_url
+    # Fallback: return the main page itself (but this will likely fail)
+    return base_url
 
-    # Individual speech pages often contain a date pattern like /speech/2026/speaker20260515a.htm
-    # or /newsevents/pressreleases/20260515a.htm
-    # They typically have a month-like abbreviation or a digit-letter ending
+def looks_like_individual_doc(url):
+    """Return True if the URL looks like an individual document, not a list/archive."""
+    # Exclude known non-document pages
+    if any(kw in url for kw in ['foia', 'rss', '.xml', 'speeches.htm', 'pressreleases.htm', 'fomcminutes.htm']):
+        return False
+    # Individual pages often contain a date-like pattern, e.g., /speech/2026/bowman20260514a.htm
+    # Or pressreleases/20260515a.htm
+    # They usually have a month abbreviation or a digit+letter ending
     if re.search(r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', url, re.IGNORECASE):
         return True
-    if re.search(r'\d{4,}[a-z]\.htm', url, re.IGNORECASE):  # e.g. 20260515a.htm
+    if re.search(r'\d{4,}[a-z]\.htm', url, re.IGNORECASE):
         return True
-    if re.search(r'\d{4,}press\.htm', url, re.IGNORECASE):  # yearly press release list
-        return False
     return False
 
-# ---------- SOURCE SCRAPERS (CONTENT‑AREA ONLY) ----------
+# ---------- SOURCE SCRAPERS (TWO-STEP) ----------
 def scrape_fed_speeches():
     try:
-        soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
-        # Only search inside the main content area
-        content = soup.find('div', id='content') or soup
-        items = content.select('a[href*="speech"]')
+        main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
+        archive_url = get_current_year_archive(main_soup,
+                                               "https://www.federalreserve.gov/newsevents/speeches.htm",
+                                               "-speeches")
+        logging.info(f"Using speech archive: {archive_url}")
+        soup = fetch_soup(archive_url)
+        # Look for links containing '/speech/' (individual speech pages)
+        items = soup.select('a[href*="/speech/"]')
         sources = []
         for a in items:
             if len(sources) >= 3:
@@ -94,9 +101,13 @@ def scrape_fed_speeches():
 
 def scrape_fomc_statements():
     try:
-        soup = fetch_soup("https://www.federalreserve.gov/newsevents/pressreleases.htm")
-        content = soup.find('div', id='content') or soup
-        items = content.select('a[href*="pressrelease"]')
+        main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/pressreleases.htm")
+        archive_url = get_current_year_archive(main_soup,
+                                               "https://www.federalreserve.gov/newsevents/pressreleases.htm",
+                                               "-press")
+        logging.info(f"Using press release archive: {archive_url}")
+        soup = fetch_soup(archive_url)
+        items = soup.select('a[href*="/pressrelease"]')
         sources = []
         for a in items:
             if len(sources) >= 2:
@@ -116,9 +127,13 @@ def scrape_fomc_statements():
 
 def scrape_fomc_minutes():
     try:
-        soup = fetch_soup("https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm")
-        content = soup.find('div', id='content') or soup
-        items = content.select('a[href*="fomcminutes"]')
+        main_soup = fetch_soup("https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm")
+        archive_url = get_current_year_archive(main_soup,
+                                               "https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm",
+                                               "fomcminutes")
+        logging.info(f"Using minutes archive: {archive_url}")
+        soup = fetch_soup(archive_url)
+        items = soup.select('a[href*="/fomcminutes"]')
         sources = []
         for a in items:
             if len(sources) >= 1:
