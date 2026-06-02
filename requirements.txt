@@ -5,3 +5,4 @@ beautifulsoup4
 groq
 flask-cors
 google-genai
+tweepy
