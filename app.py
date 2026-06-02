@@ -7,6 +7,7 @@ import datetime
 from collections import deque
 import re
 import logging
+import tweepy
 
 # ---------- AI PROVIDERS ----------
 from groq import Groq
@@ -64,12 +65,9 @@ def looks_like_individual_doc(url):
     return False
 
 def extract_speaker_from_url(url):
-    """Extract a readable speaker name from a Fed document URL."""
-    # Speeches: .../speech/powell20260531a.htm  ->  Powell
     m = re.search(r'/([a-z]+?)\d{8,}a?\.htm', url, re.IGNORECASE)
     if m:
         name = m.group(1).capitalize()
-        # Common Fed governor names
         known = {
             'Powell': 'Powell', 'Bowman': 'Bowman', 'Jefferson': 'Jefferson',
             'Waller': 'Waller', 'Warsh': 'Warsh', 'Brainard': 'Brainard',
@@ -80,9 +78,6 @@ def extract_speaker_from_url(url):
             'Kaplan': 'Kaplan', 'Daly': 'Daly', 'Barkin': 'Barkin',
         }
         return known.get(name, name)
-    # FOMC statements/minutes
-    if 'monetary' in url or 'fomc' in url.lower():
-        return 'FOMC'
     return 'Fed'
 
 # ---------- SOURCE SCRAPERS (TWO-STEP) ----------
@@ -262,7 +257,6 @@ def compute_daily_ftn():
                 if score is not None:
                     scores.append(score)
                     total_chars += len(text)
-                    # Add speaker name from URL
                     speaker = extract_speaker_from_url(src['url'])
                     sources_detail.append({
                         'type': src['type'],
@@ -323,6 +317,66 @@ def ftn_latest():
 @app.route('/')
 def home():
     return "F-Tone (FTN) Federal Reserve Tone Index is live. Use /api/ftn_latest"
+
+# ---------- X AUTO‑POST ENDPOINT ----------
+def post_to_x():
+    """Fetch the latest FTN score and post it as a tweet."""
+    try:
+        # Get the latest score from our own API
+        score, confidence, sources = compute_daily_ftn()
+        if score is None:
+            return "No score available"
+
+        prev = list(score_history)
+        change = round(score - prev[-2], 1) if len(prev) > 1 else 0
+
+        # Determine arrow
+        if change == 0:
+            arrow = "—"
+        elif change > 0:
+            arrow = f"▲{abs(change)}"
+        else:
+            arrow = f"▼{abs(change)}"
+
+        # Determine label
+        if score <= 20:
+            label = "Extremely Dovish"
+        elif score <= 40:
+            label = "Dovish"
+        elif score <= 60:
+            label = "Neutral"
+        elif score <= 80:
+            label = "Hawkish"
+        else:
+            label = "Extremely Hawkish"
+
+        sources_count = len(sources) if sources else 0
+
+        tweet_text = (
+            f"🏛️ FTN today: {score} {arrow} — {label}\n"
+            f"Confidence: {confidence} | Sources: {sources_count}\n"
+            f"Live: https://ftone-index.github.io/ftone-dashboard/"
+        )
+
+        # Authenticate to X
+        client = tweepy.Client(
+            consumer_key=os.environ["X_CONSUMER_KEY"],
+            consumer_secret=os.environ["X_CONSUMER_SECRET"],
+            access_token=os.environ["X_ACCESS_TOKEN"],
+            access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"]
+        )
+
+        response = client.create_tweet(text=tweet_text)
+        logging.info(f"Tweet posted: {response.data['id']}")
+        return "Tweet posted successfully"
+    except Exception as e:
+        logging.error(f"Auto‑post failed: {e}")
+        return f"Error posting tweet: {e}"
+
+@app.route('/post_tweet')
+def auto_post():
+    result = post_to_x()
+    return jsonify({"status": result})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
