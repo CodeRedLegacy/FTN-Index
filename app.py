@@ -320,7 +320,7 @@ def home():
 
 # ---------- X AUTO‑POST ENDPOINT ----------
 def post_to_x():
-    """Fetch the latest FTN score and post it as a tweet."""
+    """Fetch the latest FTN score and post it as a tweet (no URL)."""
     try:
         # Get the latest score from our own API
         score, confidence, sources = compute_daily_ftn()
@@ -352,10 +352,10 @@ def post_to_x():
 
         sources_count = len(sources) if sources else 0
 
+        # -- URL‑FREE TWEET TEMPLATE (profile link is sufficient) --
         tweet_text = (
             f"🏛️ FTN today: {score} {arrow} — {label}\n"
-            f"Confidence: {confidence} | Sources: {sources_count}\n"
-            f"Live: https://ftone-index.github.io/ftone-dashboard/"
+            f"Confidence: {confidence} | Sources: {sources_count}"
         )
 
         # Authenticate to X
