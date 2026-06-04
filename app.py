@@ -8,6 +8,7 @@ from collections import deque
 import re
 import logging
 import tweepy
+import resend
 
 # ---------- AI PROVIDERS ----------
 from groq import Groq
@@ -28,6 +29,9 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 
 score_history = deque(maxlen=7)
+
+# ---------- MOVING ALERT STATE ----------
+last_alerted_raw_score = None   # Prevent duplicate alerts for the same move
 
 # ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
@@ -320,25 +324,18 @@ def home():
 
 # ---------- X AUTO‑POST ENDPOINT ----------
 def post_to_x():
-    """Fetch the latest FTN score and post it as a tweet (no URL)."""
     try:
-        # Get the latest score from our own API
         score, confidence, sources = compute_daily_ftn()
         if score is None:
             return "No score available"
-
         prev = list(score_history)
         change = round(score - prev[-2], 1) if len(prev) > 1 else 0
-
-        # Determine arrow
         if change == 0:
             arrow = "—"
         elif change > 0:
             arrow = f"▲{abs(change)}"
         else:
             arrow = f"▼{abs(change)}"
-
-        # Determine label
         if score <= 20:
             label = "Extremely Dovish"
         elif score <= 40:
@@ -349,23 +346,17 @@ def post_to_x():
             label = "Hawkish"
         else:
             label = "Extremely Hawkish"
-
         sources_count = len(sources) if sources else 0
-
-        # -- URL‑FREE TWEET TEMPLATE (profile link is sufficient) --
         tweet_text = (
             f"🏛️ FTN today: {score} {arrow} — {label}\n"
             f"Confidence: {confidence} | Sources: {sources_count}"
         )
-
-        # Authenticate to X
         client = tweepy.Client(
             consumer_key=os.environ["X_CONSUMER_KEY"],
             consumer_secret=os.environ["X_CONSUMER_SECRET"],
             access_token=os.environ["X_ACCESS_TOKEN"],
             access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"]
         )
-
         response = client.create_tweet(text=tweet_text)
         logging.info(f"Tweet posted: {response.data['id']}")
         return "Tweet posted successfully"
@@ -377,6 +368,65 @@ def post_to_x():
 def auto_post():
     result = post_to_x()
     return jsonify({"status": result})
+
+# ---------- MOVING ALERT ENDPOINT ----------
+@app.route('/moving')
+def moving_alert():
+    global last_alerted_raw_score
+    resend_api_key = os.environ.get("RESEND_API_KEY")
+    alert_emails = os.environ.get("ALERT_EMAILS", "")
+
+    # Get current raw score
+    _, _, _ = compute_daily_ftn()   # updates score_history
+    if len(score_history) == 0:
+        return jsonify({"status": "No data", "alert_sent": False})
+    current_raw = list(score_history)[-1]   # the most recent raw score
+
+    # Determine threshold
+    if last_alerted_raw_score is None:
+        # First run – just store and don't alert yet (avoid noise on cold start)
+        last_alerted_raw_score = current_raw
+        return jsonify({"status": "Initialized", "alert_sent": False, "current_raw": current_raw})
+
+    diff = abs(current_raw - last_alerted_raw_score)
+    if diff < 5:
+        return jsonify({"status": "No significant move", "alert_sent": False, "current_raw": current_raw, "last_alerted": last_alerted_raw_score})
+
+    # Big move detected – send email alert if Resend is configured
+    if not resend_api_key or not alert_emails:
+        logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – skipping email alert")
+        last_alerted_raw_score = current_raw
+        return jsonify({"status": "Move detected but email not configured", "alert_sent": False, "current_raw": current_raw})
+
+    resend.api_key = resend_api_key
+    recipients = [email.strip() for email in alert_emails.split(",") if email.strip()]
+    direction = "higher" if current_raw > last_alerted_raw_score else "lower"
+    subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
+    body = f"""FTN Index has moved significantly.
+
+Previous raw score: {last_alerted_raw_score:.1f}
+Current raw score:  {current_raw:.1f}
+Change: {direction} by {diff:.1f} points
+
+Live dashboard: https://ftone-index.github.io/ftone-dashboard/
+Raw API: https://ftn-index.onrender.com/api/ftn_latest
+
+This is an automated alert. Unsubscribe by replying to this email.
+"""
+    try:
+        for email in recipients:
+            resend.Emails.send({
+                "from": "FTN Alerts <alerts@ftone-index.dev>",
+                "to": email,
+                "subject": subject,
+                "text": body
+            })
+        logging.info(f"Moving alert email sent to {len(recipients)} recipients")
+        last_alerted_raw_score = current_raw
+        return jsonify({"status": "Alert sent", "alert_sent": True, "current_raw": current_raw, "recipients": len(recipients)})
+    except Exception as e:
+        logging.error(f"Failed to send alert email: {e}")
+        return jsonify({"status": "Error sending email", "alert_sent": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
