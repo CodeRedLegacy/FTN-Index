@@ -293,11 +293,56 @@ def health():
 
 @app.route('/ping')
 def ping():
+    global last_alerted_raw_score
     score, confidence, sources = compute_daily_ftn()
     if score is None:
         return jsonify({"status": "error", "message": "No data"}), 500
+
+    # ---------- MOVING ALERT LOGIC (integrated) ----------
+    current_raw = list(score_history)[-1] if score_history else None
+    if current_raw is not None and last_alerted_raw_score is not None:
+        diff = abs(current_raw - last_alerted_raw_score)
+        if diff >= 5:
+            # Attempt to send email alert
+            resend_api_key = os.environ.get("RESEND_API_KEY")
+            alert_emails = os.environ.get("ALERT_EMAILS", "")
+            if resend_api_key and alert_emails:
+                resend.api_key = resend_api_key
+                recipients = [e.strip() for e in alert_emails.split(",") if e.strip()]
+                direction = "higher" if current_raw > last_alerted_raw_score else "lower"
+                subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
+                body = f"""FTN Index has moved significantly.
+
+Previous raw score: {last_alerted_raw_score:.1f}
+Current raw score:  {current_raw:.1f}
+Change: {direction} by {diff:.1f} points
+
+Live dashboard: https://ftone-index.github.io/ftone-dashboard/
+Raw API: https://ftn-index.onrender.com/api/ftn_latest
+
+This is an automated alert. Unsubscribe by replying to this email.
+"""
+                try:
+                    for email in recipients:
+                        resend.Emails.send({
+                            "from": "FTN Alerts <alerts@ftone-index.resend.dev>",
+                            "to": email,
+                            "subject": subject,
+                            "text": body
+                        })
+                    logging.info(f"Alert email sent to {len(recipients)} recipients")
+                except Exception as e:
+                    logging.error(f"Failed to send alert email: {e}")
+            else:
+                logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – alert skipped")
+        # Update last alerted score regardless of whether email was sent
+        last_alerted_raw_score = current_raw
+    elif last_alerted_raw_score is None and current_raw is not None:
+        # First run – initialise without sending alert
+        last_alerted_raw_score = current_raw
+
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({"status": "ok", "score": score, "timestamp": ts})
+    return jsonify({"status": "ok", "score": score, "timestamp": ts, "alert_sent": False})   # alert_sent info not exposed
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
@@ -369,64 +414,27 @@ def auto_post():
     result = post_to_x()
     return jsonify({"status": result})
 
-# ---------- MOVING ALERT ENDPOINT ----------
+# ---------- MANUAL MOVING ALERT ENDPOINT (for testing) ----------
 @app.route('/moving')
 def moving_alert():
     global last_alerted_raw_score
-    resend_api_key = os.environ.get("RESEND_API_KEY")
-    alert_emails = os.environ.get("ALERT_EMAILS", "")
-
-    # Get current raw score
-    _, _, _ = compute_daily_ftn()   # updates score_history
-    if len(score_history) == 0:
-        return jsonify({"status": "No data", "alert_sent": False})
-    current_raw = list(score_history)[-1]   # the most recent raw score
-
-    # Determine threshold
+    # This endpoint is now just a manual trigger – the real alert runs inside /ping
+    # We'll force a check and return the current state
+    _, _, _ = compute_daily_ftn()
+    current_raw = list(score_history)[-1] if score_history else None
+    if current_raw is None:
+        return jsonify({"status": "No data"})
     if last_alerted_raw_score is None:
-        # First run – just store and don't alert yet (avoid noise on cold start)
         last_alerted_raw_score = current_raw
-        return jsonify({"status": "Initialized", "alert_sent": False, "current_raw": current_raw})
-
+        return jsonify({"status": "Initialized", "current_raw": current_raw})
     diff = abs(current_raw - last_alerted_raw_score)
-    if diff < 5:
-        return jsonify({"status": "No significant move", "alert_sent": False, "current_raw": current_raw, "last_alerted": last_alerted_raw_score})
-
-    # Big move detected – send email alert if Resend is configured
-    if not resend_api_key or not alert_emails:
-        logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – skipping email alert")
-        last_alerted_raw_score = current_raw
-        return jsonify({"status": "Move detected but email not configured", "alert_sent": False, "current_raw": current_raw})
-
-    resend.api_key = resend_api_key
-    recipients = [email.strip() for email in alert_emails.split(",") if email.strip()]
-    direction = "higher" if current_raw > last_alerted_raw_score else "lower"
-    subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
-    body = f"""FTN Index has moved significantly.
-
-Previous raw score: {last_alerted_raw_score:.1f}
-Current raw score:  {current_raw:.1f}
-Change: {direction} by {diff:.1f} points
-
-Live dashboard: https://ftone-index.github.io/ftone-dashboard/
-Raw API: https://ftn-index.onrender.com/api/ftn_latest
-
-This is an automated alert. Unsubscribe by replying to this email.
-"""
-    try:
-        for email in recipients:
-            resend.Emails.send({
-                "from": "FTN Alerts <alerts@ftone-index.dev>",
-                "to": email,
-                "subject": subject,
-                "text": body
-            })
-        logging.info(f"Moving alert email sent to {len(recipients)} recipients")
-        last_alerted_raw_score = current_raw
-        return jsonify({"status": "Alert sent", "alert_sent": True, "current_raw": current_raw, "recipients": len(recipients)})
-    except Exception as e:
-        logging.error(f"Failed to send alert email: {e}")
-        return jsonify({"status": "Error sending email", "alert_sent": False, "error": str(e)}), 500
+    return jsonify({
+        "status": "checked",
+        "current_raw": current_raw,
+        "last_alerted": last_alerted_raw_score,
+        "diff": diff,
+        "big_move": diff >= 5
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
