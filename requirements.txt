@@ -6,3 +6,4 @@ groq
 flask-cors
 google-genai
 tweepy
+resend
