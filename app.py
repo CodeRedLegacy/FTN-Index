@@ -298,7 +298,7 @@ Text:
     logging.error("No Gemini API keys configured")
     return None
 
-# ---------- COMBINED PIPELINE ----------
+# ---------- COMBINED PIPELINE (SMOOTHING FIXED) ----------
 def compute_daily_ftn():
     all_sources = []
     all_sources.extend(scrape_fed_speeches())
@@ -330,11 +330,23 @@ def compute_daily_ftn():
                     logging.info(f"Scored {src['type']}: {score}")
         except Exception as e:
             logging.error(f"Error processing {src['url']}: {e}")
+
     if not scores:
         return None, None, []
+
+    # --- Compute today's raw score (before adding to history) ---
     raw = sum(scores) / len(scores)
+
+    # --- Smoothed score = average of PAST scores only (excludes today) ---
+    if len(score_history) > 0:
+        smoothed = round(sum(score_history) / len(score_history), 1)
+    else:
+        smoothed = round(raw, 1)   # First day: smoothed = raw
+
+    # --- Now add today's raw to history for FUTURE smoothing ---
     score_history.append(raw)
-    smoothed = round(sum(score_history) / len(score_history), 1)
+
+    # --- Confidence ---
     num_sources = len(sources_detail)
     if num_sources >= 4 and total_chars > 8000:
         confidence = "HIGH"
@@ -342,6 +354,7 @@ def compute_daily_ftn():
         confidence = "MEDIUM"
     else:
         confidence = "LOW"
+
     return smoothed, confidence, sources_detail
 
 # ---------- MARKET EXPECTATION ENDPOINT (Solution B, final) ----------
