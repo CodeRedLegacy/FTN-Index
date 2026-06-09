@@ -13,7 +13,6 @@ import resend
 # ---------- AI PROVIDERS ----------
 from groq import Groq
 
-# Try primary Groq key first, fall back to secondary
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2")
 
@@ -52,14 +51,14 @@ def fetch_soup(url, timeout=10):
     r = requests.get(url, timeout=timeout)
     return BeautifulSoup(r.text, 'html.parser')
 
-def extract_text(soup):
+def extract_text(soup, max_chars=4000):
     for selector in ['article', 'div#content', 'body']:
         if selector == 'div#content':
             tag = soup.find('div', id='content')
         else:
             tag = soup.select_one(selector)
         if tag:
-            return tag.get_text()[:4000]
+            return tag.get_text()[:max_chars]
     return ""
 
 def get_current_year_archive(main_soup, base_url, keyword):
@@ -98,20 +97,17 @@ def extract_speaker_from_url(url):
         return known.get(name, name)
     return 'Fed'
 
-# ---------- SOURCE SCRAPERS ----------
+# ---------- SOURCE SCRAPERS (FULL QUALITY) ----------
 def scrape_fed_speeches():
     try:
         main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
         archive_url = get_current_year_archive(main_soup,
                                                "https://www.federalreserve.gov/newsevents/speeches.htm",
                                                "-speeches")
-        logging.info(f"Using speech archive: {archive_url}")
         soup = fetch_soup(archive_url)
         items = soup.select('a[href*="/speech/"]')
         sources = []
-        for a in items:
-            if len(sources) >= 3:
-                break
+        for a in items[:3]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
@@ -131,13 +127,10 @@ def scrape_fomc_statements():
         archive_url = get_current_year_archive(main_soup,
                                                "https://www.federalreserve.gov/newsevents/pressreleases.htm",
                                                "-press")
-        logging.info(f"Using press release archive: {archive_url}")
         soup = fetch_soup(archive_url)
         items = soup.select('a[href*="/pressrelease"]')
         sources = []
-        for a in items:
-            if len(sources) >= 2:
-                break
+        for a in items[:2]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
@@ -157,13 +150,10 @@ def scrape_fomc_minutes():
         archive_url = get_current_year_archive(main_soup,
                                                "https://www.federalreserve.gov/monetarypolicy/fomcminutes.htm",
                                                "fomcminutes")
-        logging.info(f"Using minutes archive: {archive_url}")
         soup = fetch_soup(archive_url)
         items = soup.select('a[href*="fomcminutes"]')
         sources = []
-        for a in items:
-            if len(sources) >= 1:
-                break
+        for a in items[:1]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
@@ -348,19 +338,13 @@ def compute_daily_ftn():
     if not scores:
         return None, None, []
 
-    # --- Compute today's raw score (before adding to history) ---
     raw = sum(scores) / len(scores)
-
-    # --- Smoothed score = average of PAST scores only (excludes today) ---
     if len(score_history) > 0:
         smoothed = round(sum(score_history) / len(score_history), 1)
     else:
-        smoothed = round(raw, 1)   # First day: smoothed = raw
-
-    # --- Now add today's raw to history for FUTURE smoothing ---
+        smoothed = round(raw, 1)
     score_history.append(raw)
 
-    # --- Confidence ---
     num_sources = len(sources_detail)
     if num_sources >= 4 and total_chars > 8000:
         confidence = "HIGH"
@@ -370,127 +354,6 @@ def compute_daily_ftn():
         confidence = "LOW"
 
     return smoothed, confidence, sources_detail
-
-# ---------- MARKET EXPECTATION ENDPOINT (Solution B, final) ----------
-def compute_market_ftn():
-    """
-    Returns a 0‑100 score representing what the market is pricing in
-    about the Fed's next moves, derived from:
-      - 2‑year Treasury yield (rate hike/cut expectations)
-      - 2y/10y Treasury spread (yield curve)
-      - US Dollar Index (DXY) intraday change
-    """
-    y2 = None
-    y10 = None
-    spread = 0
-    dxy_change = 0
-
-    fred_api_key = os.environ.get("FRED_API_KEY")
-    if fred_api_key:
-        try:
-            # 2‑year yield
-            resp_2y = requests.get(
-                f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS2&api_key={fred_api_key}&file_type=json&sort_order=desc&limit=1",
-                timeout=15
-            )
-            if resp_2y.status_code == 200:
-                obs = resp_2y.json().get("observations", [])
-                if obs:
-                    y2 = float(obs[0].get("value", 0) or 0)
-
-            # 10‑year yield
-            resp_10y = requests.get(
-                f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key={fred_api_key}&file_type=json&sort_order=desc&limit=1",
-                timeout=15
-            )
-            if resp_10y.status_code == 200:
-                obs = resp_10y.json().get("observations", [])
-                if obs:
-                    y10 = float(obs[0].get("value", 0) or 0)
-
-            if y2 is not None and y10 is not None:
-                spread = y10 - y2
-        except Exception as e:
-            logging.warning(f"FRED error: {e}")
-
-    # 2‑year yield as rate‑hike expectation
-    # Map a plausible range (3%–6%) to 0–100
-    if y2 is not None and y2 > 0:
-        hike_score = min(100, max(0, (y2 - 3.0) * (100 / 3.0)))
-    else:
-        hike_score = 50   # neutral default
-
-    # Spread score: -1 to +1 → 0 to 100
-    spread_score = min(100, max(0, 50 + spread * 50))
-
-    # DXY intraday change
-    try:
-        dxy_url = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=1d"
-        dxy_resp = requests.get(dxy_url, timeout=15)
-        if dxy_resp.status_code == 200:
-            dxy_json = dxy_resp.json()
-            result = dxy_json.get("chart", {}).get("result", [])
-            if result:
-                meta = result[0].get("meta", {})
-                # Try quote indicators first (open/close)
-                indicators = result[0].get("indicators", {}).get("quote", [{}])
-                if indicators and indicators[0]:
-                    opens = indicators[0].get("open", [])
-                    closes = indicators[0].get("close", [])
-                    if opens and closes and opens[0] and closes[0]:
-                        open_val = float(opens[0])
-                        close_val = float(closes[0])
-                        if open_val and close_val:
-                            dxy_change = ((close_val / open_val) - 1) * 100
-                # Fallback to meta previousClose
-                if dxy_change == 0:
-                    prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
-                    current = meta.get("regularMarketPrice")
-                    if prev_close and current:
-                        dxy_change = ((current / prev_close) - 1) * 100
-    except Exception as e:
-        logging.warning(f"DXY error: {e}")
-
-    # DXY score: -0.5% to +0.5% → 0 to 100
-    dxy_score = min(100, max(0, 50 + dxy_change * 100))
-
-    # Average the three components
-    market_ftn = round((hike_score + spread_score + dxy_score) / 3, 1)
-
-    # Label
-    if market_ftn <= 20:
-        label = "Extremely Dovish"
-    elif market_ftn <= 40:
-        label = "Dovish"
-    elif market_ftn <= 60:
-        label = "Neutral"
-    elif market_ftn <= 80:
-        label = "Hawkish"
-    else:
-        label = "Extremely Hawkish"
-
-    return market_ftn, label, {
-        "y2": y2,
-        "spread": spread,
-        "dxy_change": dxy_change,
-        "hike_score": hike_score,
-        "spread_score": spread_score,
-        "dxy_score": dxy_score
-    }
-
-@app.route('/api/market_ftn')
-def market_ftn():
-    score, label, components = compute_market_ftn()
-    if score is None:
-        return jsonify({"error": "Market data unavailable"}), 500
-    ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({
-        "index": "Market Expectation (FTN‑M)",
-        "score": score,
-        "label": label,
-        "components": components,
-        "timestamp": ts
-    })
 
 # ---------- ROUTES ----------
 @app.route('/health')
