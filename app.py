@@ -42,8 +42,6 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 
 score_history = deque(maxlen=7)
-
-# ---------- MOVING ALERT STATE ----------
 last_alerted_raw_score = None
 
 # ---------- HELPERS ----------
@@ -97,7 +95,7 @@ def extract_speaker_from_url(url):
         return known.get(name, name)
     return 'Fed'
 
-# ---------- SOURCE SCRAPERS (FULL QUALITY) ----------
+# ---------- SOURCE SCRAPERS (PRIMARY ONLY) ----------
 def scrape_fed_speeches():
     try:
         main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
@@ -165,61 +163,6 @@ def scrape_fomc_minutes():
         return sources
     except Exception as e:
         logging.error(f"FOMC minutes scrape error: {e}")
-        return []
-
-def scrape_regional_fed_speeches():
-    try:
-        soup = fetch_soup("https://www.newyorkfed.org/newsevents/speeches")
-        items = soup.select('a[href*="speech"]')
-        sources = []
-        for a in items[:2]:
-            href = a.get('href')
-            if href:
-                full_url = "https://www.newyorkfed.org" + href if href.startswith('/') else href
-                title = a.get_text(strip=True) or "Regional Fed Speech"
-                if not any(s['url'] == full_url for s in sources):
-                    sources.append({'type': 'regional_speech', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} regional Fed speech links")
-        return sources
-    except Exception as e:
-        logging.error(f"Regional Fed speeches scrape error: {e}")
-        return []
-
-def scrape_fed_testimony():
-    try:
-        soup = fetch_soup("https://www.federalreserve.gov/newsevents/testimony.htm")
-        items = soup.select('a[href*="testimony"]')
-        sources = []
-        for a in items[:2]:
-            href = a.get('href')
-            if href:
-                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                if looks_like_individual_doc(full_url):
-                    title = a.get_text(strip=True) or "Testimony"
-                    if not any(s['url'] == full_url for s in sources):
-                        sources.append({'type': 'testimony', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} testimony links")
-        return sources
-    except Exception as e:
-        logging.error(f"Testimony scrape error: {e}")
-        return []
-
-def scrape_fed_blogs():
-    try:
-        soup = fetch_soup("https://libertystreeteconomics.newyorkfed.org/")
-        items = soup.select('a[href*="libertystreeteconomics"]')
-        sources = []
-        for a in items[:2]:
-            href = a.get('href')
-            if href:
-                full_url = href if href.startswith('http') else "https://libertystreeteconomics.newyorkfed.org" + href
-                title = a.get_text(strip=True) or "Fed Blog Post"
-                if not any(s['url'] == full_url for s in sources):
-                    sources.append({'type': 'fed_blog', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} Fed blog links")
-        return sources
-    except Exception as e:
-        logging.error(f"Fed blogs scrape error: {e}")
         return []
 
 # ---------- AI SCORING ----------
@@ -302,15 +245,33 @@ Text:
     logging.error("No Gemini API keys configured")
     return None
 
-# ---------- COMBINED PIPELINE (SMOOTHING FIXED) ----------
+# ---------- COMBINED PIPELINE ----------
 def compute_daily_ftn():
     all_sources = []
     all_sources.extend(scrape_fed_speeches())
     all_sources.extend(scrape_fomc_statements())
     all_sources.extend(scrape_fomc_minutes())
-    all_sources.extend(scrape_regional_fed_speeches())
-    all_sources.extend(scrape_fed_testimony())
-    all_sources.extend(scrape_fed_blogs())
+    # Fetch additional sources from FTN-Market
+    market_scores_url = os.environ.get("MARKET_SCORES_URL", "https://ftn-market.onrender.com/api/extra_scores")
+    try:
+        resp = requests.get(market_scores_url, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            extra_sources = data.get("sources", [])
+            extra_scores = data.get("scores", [])
+            all_sources.extend(extra_sources)
+            # We'll score the extra documents here as well, using the same AI
+            for src in extra_sources:
+                soup = fetch_soup(src['url'])
+                text = extract_text(soup)
+                if text:
+                    score = score_text_with_ai(text)
+                    if score is not None:
+                        extra_scores.append(score)
+    except Exception as e:
+        logging.warning(f"Could not fetch extra sources from FTN-Market: {e}")
+
+    # Now score primary sources
     scores = []
     total_chars = 0
     sources_detail = []
@@ -477,7 +438,6 @@ def auto_post():
     result = post_to_x()
     return jsonify({"status": result})
 
-# ---------- MANUAL MOVING ALERT ENDPOINT (for testing) ----------
 @app.route('/moving')
 def moving_alert():
     global last_alerted_raw_score
