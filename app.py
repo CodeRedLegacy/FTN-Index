@@ -12,12 +12,26 @@ import resend
 
 # ---------- AI PROVIDERS ----------
 from groq import Groq
+
+# Try primary Groq key first, fall back to secondary
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_API_KEY_2 = os.environ.get("GROQ_API_KEY_2")
+
 groq_client = None
 if GROQ_API_KEY and GROQ_API_KEY.strip():
-    groq_client = Groq(api_key=GROQ_API_KEY)
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+        logging.info("Groq client initialized with primary key")
+    except Exception as e:
+        logging.warning(f"Failed to initialize Groq with primary key: {e}")
+elif GROQ_API_KEY_2 and GROQ_API_KEY_2.strip():
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY_2)
+        logging.info("Groq client initialized with secondary key")
+    except Exception as e:
+        logging.warning(f"Failed to initialize Groq with secondary key: {e}")
 else:
-    logging.warning("GROQ_API_KEY is empty or missing; Groq will be skipped.")
+    logging.warning("No valid GROQ_API_KEY found; Groq will be skipped.")
 
 from google import genai
 GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
@@ -245,7 +259,7 @@ Text:
         except Exception as e:
             logging.warning(f"Groq failed ({e}), falling back to Gemini-1...")
     else:
-        logging.info("Groq key not configured, skipping to Gemini...")
+        logging.info("Groq client not available, skipping to Gemini...")
     if GEMINI_KEY_1:
         try:
             gemini_client = genai.Client(api_key=GEMINI_KEY_1)
