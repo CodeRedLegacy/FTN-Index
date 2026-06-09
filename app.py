@@ -344,84 +344,91 @@ def compute_daily_ftn():
         confidence = "LOW"
     return smoothed, confidence, sources_detail
 
-# ---------- MARKET EXPECTATION ENDPOINT (Solution B, robust) ----------
+# ---------- MARKET EXPECTATION ENDPOINT (Solution B, final) ----------
 def compute_market_ftn():
     """
     Returns a 0‑100 score representing what the market is pricing in
     about the Fed's next moves, derived from:
-      - CME FedWatch (probability of next rate hike)
-      - 2y/10y Treasury spread (via FRED)
-      - US Dollar Index (DXY) (via Yahoo Finance)
-    Falls back gracefully if any source is unavailable.
+      - 2‑year Treasury yield (rate hike/cut expectations)
+      - 2y/10y Treasury spread (yield curve)
+      - US Dollar Index (DXY) intraday change
     """
-    hike_prob = 50        # neutral default
-    spread = 0            # neutral default
-    dxy_change = 0        # neutral default
+    y2 = None
+    y10 = None
+    spread = 0
+    dxy_change = 0
 
-    # 1. CME FedWatch – with longer timeout and error handling
-    try:
-        fedwatch_url = "https://www.cmegroup.com/CmeWS/mvc/InterestRates/FOMC/Current"
-        fw_response = requests.get(fedwatch_url, timeout=25)
-        if fw_response.status_code == 200:
-            fw_json = fw_response.json()
-            meetings = fw_json.get("meetings", [])
-            if meetings:
-                for outcome in meetings[0].get("outcomes", []):
-                    if "higher" in outcome.get("label", "").lower() or "hike" in outcome.get("label", "").lower():
-                        hike_prob = outcome.get("probability", 50)
-                        break
-        else:
-            logging.warning(f"CME FedWatch returned status {fw_response.status_code}")
-    except requests.exceptions.Timeout:
-        logging.warning("CME FedWatch timed out – using default hike_prob=50")
-    except Exception as e:
-        logging.warning(f"CME FedWatch error: {e}")
-
-    # 2. FRED spread – only if we have a FRED API key
     fred_api_key = os.environ.get("FRED_API_KEY")
     if fred_api_key:
         try:
-            fred_2y = requests.get(
+            # 2‑year yield
+            resp_2y = requests.get(
                 f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS2&api_key={fred_api_key}&file_type=json&sort_order=desc&limit=1",
                 timeout=15
             )
-            fred_10y = requests.get(
+            if resp_2y.status_code == 200:
+                obs = resp_2y.json().get("observations", [])
+                if obs:
+                    y2 = float(obs[0].get("value", 0) or 0)
+
+            # 10‑year yield
+            resp_10y = requests.get(
                 f"https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key={fred_api_key}&file_type=json&sort_order=desc&limit=1",
                 timeout=15
             )
-            if fred_2y.status_code == 200 and fred_10y.status_code == 200:
-                obs_2y = fred_2y.json().get("observations", [])
-                obs_10y = fred_10y.json().get("observations", [])
-                if obs_2y and obs_10y:
-                    y2 = float(obs_2y[0].get("value", 0) or 0)
-                    y10 = float(obs_10y[0].get("value", 0) or 0)
-                    if y2 and y10:
-                        spread = y10 - y2
+            if resp_10y.status_code == 200:
+                obs = resp_10y.json().get("observations", [])
+                if obs:
+                    y10 = float(obs[0].get("value", 0) or 0)
+
+            if y2 is not None and y10 is not None:
+                spread = y10 - y2
         except Exception as e:
             logging.warning(f"FRED error: {e}")
 
-    # 3. DXY via Yahoo Finance (lightweight, rarely fails)
+    # 2‑year yield as rate‑hike expectation
+    # Map a plausible range (3%–6%) to 0–100
+    if y2 is not None and y2 > 0:
+        hike_score = min(100, max(0, (y2 - 3.0) * (100 / 3.0)))
+    else:
+        hike_score = 50   # neutral default
+
+    # Spread score: -1 to +1 → 0 to 100
+    spread_score = min(100, max(0, 50 + spread * 50))
+
+    # DXY intraday change
     try:
         dxy_url = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=1d"
-        dxy_response = requests.get(dxy_url, timeout=15)
-        if dxy_response.status_code == 200:
-            dxy_json = dxy_response.json()
+        dxy_resp = requests.get(dxy_url, timeout=15)
+        if dxy_resp.status_code == 200:
+            dxy_json = dxy_resp.json()
             result = dxy_json.get("chart", {}).get("result", [])
             if result:
                 meta = result[0].get("meta", {})
-                prev_close = meta.get("previousClose")
-                current = meta.get("regularMarketPrice")
-                if prev_close and current:
-                    dxy_change = ((current / prev_close) - 1) * 100
+                # Try quote indicators first (open/close)
+                indicators = result[0].get("indicators", {}).get("quote", [{}])
+                if indicators and indicators[0]:
+                    opens = indicators[0].get("open", [])
+                    closes = indicators[0].get("close", [])
+                    if opens and closes and opens[0] and closes[0]:
+                        open_val = float(opens[0])
+                        close_val = float(closes[0])
+                        if open_val and close_val:
+                            dxy_change = ((close_val / open_val) - 1) * 100
+                # Fallback to meta previousClose
+                if dxy_change == 0:
+                    prev_close = meta.get("previousClose") or meta.get("chartPreviousClose")
+                    current = meta.get("regularMarketPrice")
+                    if prev_close and current:
+                        dxy_change = ((current / prev_close) - 1) * 100
     except Exception as e:
         logging.warning(f"DXY error: {e}")
 
-    # Combine into a single 0‑100 score
-    # hike_prob is already 0‑100
-    spread_score = min(100, max(0, 50 + spread * 50))
+    # DXY score: -0.5% to +0.5% → 0 to 100
     dxy_score = min(100, max(0, 50 + dxy_change * 100))
 
-    market_ftn = round((hike_prob + spread_score + dxy_score) / 3, 1)
+    # Average the three components
+    market_ftn = round((hike_score + spread_score + dxy_score) / 3, 1)
 
     # Label
     if market_ftn <= 20:
@@ -436,9 +443,12 @@ def compute_market_ftn():
         label = "Extremely Hawkish"
 
     return market_ftn, label, {
-        "hike_prob": hike_prob,
+        "y2": y2,
         "spread": spread,
-        "dxy_change": dxy_change
+        "dxy_change": dxy_change,
+        "hike_score": hike_score,
+        "spread_score": spread_score,
+        "dxy_score": dxy_score
     }
 
 @app.route('/api/market_ftn')
