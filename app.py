@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 score_history = deque(maxlen=7)
 
 # ---------- MOVING ALERT STATE ----------
-last_alerted_raw_score = None   # Prevent duplicate alerts for the same move
+last_alerted_raw_score = None
 
 # ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
@@ -84,7 +84,7 @@ def extract_speaker_from_url(url):
         return known.get(name, name)
     return 'Fed'
 
-# ---------- SOURCE SCRAPERS (TWO-STEP) ----------
+# ---------- SOURCE SCRAPERS ----------
 def scrape_fed_speeches():
     try:
         main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
@@ -161,6 +161,61 @@ def scrape_fomc_minutes():
         return sources
     except Exception as e:
         logging.error(f"FOMC minutes scrape error: {e}")
+        return []
+
+def scrape_regional_fed_speeches():
+    try:
+        soup = fetch_soup("https://www.newyorkfed.org/newsevents/speeches")
+        items = soup.select('a[href*="speech"]')
+        sources = []
+        for a in items[:2]:
+            href = a.get('href')
+            if href:
+                full_url = "https://www.newyorkfed.org" + href if href.startswith('/') else href
+                title = a.get_text(strip=True) or "Regional Fed Speech"
+                if not any(s['url'] == full_url for s in sources):
+                    sources.append({'type': 'regional_speech', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} regional Fed speech links")
+        return sources
+    except Exception as e:
+        logging.error(f"Regional Fed speeches scrape error: {e}")
+        return []
+
+def scrape_fed_testimony():
+    try:
+        soup = fetch_soup("https://www.federalreserve.gov/newsevents/testimony.htm")
+        items = soup.select('a[href*="testimony"]')
+        sources = []
+        for a in items[:2]:
+            href = a.get('href')
+            if href:
+                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                if looks_like_individual_doc(full_url):
+                    title = a.get_text(strip=True) or "Testimony"
+                    if not any(s['url'] == full_url for s in sources):
+                        sources.append({'type': 'testimony', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} testimony links")
+        return sources
+    except Exception as e:
+        logging.error(f"Testimony scrape error: {e}")
+        return []
+
+def scrape_fed_blogs():
+    try:
+        soup = fetch_soup("https://libertystreeteconomics.newyorkfed.org/")
+        items = soup.select('a[href*="libertystreeteconomics"]')
+        sources = []
+        for a in items[:2]:
+            href = a.get('href')
+            if href:
+                full_url = href if href.startswith('http') else "https://libertystreeteconomics.newyorkfed.org" + href
+                title = a.get_text(strip=True) or "Fed Blog Post"
+                if not any(s['url'] == full_url for s in sources):
+                    sources.append({'type': 'fed_blog', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} Fed blog links")
+        return sources
+    except Exception as e:
+        logging.error(f"Fed blogs scrape error: {e}")
         return []
 
 # ---------- AI SCORING ----------
@@ -249,6 +304,9 @@ def compute_daily_ftn():
     all_sources.extend(scrape_fed_speeches())
     all_sources.extend(scrape_fomc_statements())
     all_sources.extend(scrape_fomc_minutes())
+    all_sources.extend(scrape_regional_fed_speeches())
+    all_sources.extend(scrape_fed_testimony())
+    all_sources.extend(scrape_fed_blogs())
     scores = []
     total_chars = 0
     sources_detail = []
@@ -286,6 +344,106 @@ def compute_daily_ftn():
         confidence = "LOW"
     return smoothed, confidence, sources_detail
 
+# ---------- MARKET EXPECTATION ENDPOINT (Solution B) ----------
+def compute_market_ftn():
+    """
+    Returns a 0‑100 score representing what the market is pricing in
+    about the Fed's next moves, derived from:
+      - CME FedWatch (probability of next rate hike)
+      - 2y/10y Treasury spread (via FRED)
+      - US Dollar Index (DXY) (via Yahoo Finance)
+    """
+    try:
+        # 1. CME FedWatch – probability of a rate HIKE at the next meeting
+        #    We'll use the free CME FedWatch JSON endpoint.
+        fedwatch_url = "https://www.cmegroup.com/CmeWS/mvc/InterestRates/FOMC/Current"
+        fw_response = requests.get(fedwatch_url, timeout=10)
+        hike_prob = 50   # neutral default
+        if fw_response.status_code == 200:
+            fw_json = fw_response.json()
+            # The JSON structure is nested; we'll grab the first meeting's hike probability
+            meetings = fw_json.get("meetings", [])
+            if meetings:
+                # Look for the probability that the rate is HIGHER than current
+                for outcome in meetings[0].get("outcomes", []):
+                    if "higher" in outcome.get("label", "").lower() or "hike" in outcome.get("label", "").lower():
+                        hike_prob = outcome.get("probability", 50)
+                        break
+
+        # 2. 2y/10y Treasury spread (via FRED)
+        #    We'll use the free FRED API (no key needed for this simple request)
+        #    Get the latest 2‑year and 10‑year yields
+        fred_2y = requests.get("https://api.stlouisfed.org/fred/series/observations?series_id=DGS2&api_key=YOUR_FRED_API_KEY&file_type=json&sort_order=desc&limit=1", timeout=10)
+        fred_10y = requests.get("https://api.stlouisfed.org/fred/series/observations?series_id=DGS10&api_key=YOUR_FRED_API_KEY&file_type=json&sort_order=desc&limit=1", timeout=10)
+        spread = 0   # neutral default
+        if fred_2y.status_code == 200 and fred_10y.status_code == 200:
+            obs_2y = fred_2y.json().get("observations", [])
+            obs_10y = fred_10y.json().get("observations", [])
+            if obs_2y and obs_10y:
+                y2 = float(obs_2y[0].get("value", 0) or 0)
+                y10 = float(obs_10y[0].get("value", 0) or 0)
+                if y2 and y10:
+                    spread = y10 - y2   # positive = steepening (hawkish), negative = inversion (dovish)
+
+        # 3. DXY (US Dollar Index) via Yahoo Finance
+        dxy_url = "https://query1.finance.yahoo.com/v8/finance/chart/DX-Y.NYB?interval=1d&range=1d"
+        dxy_response = requests.get(dxy_url, timeout=10)
+        dxy_change = 0   # neutral default
+        if dxy_response.status_code == 200:
+            dxy_json = dxy_response.json()
+            result = dxy_json.get("chart", {}).get("result", [])
+            if result:
+                meta = result[0].get("meta", {})
+                prev_close = meta.get("previousClose")
+                current = meta.get("regularMarketPrice")
+                if prev_close and current:
+                    dxy_change = ((current / prev_close) - 1) * 100   # percent change
+
+        # Combine into a single 0‑100 score
+        # hike_prob is already 0‑100
+        # spread: map -1 to +1 → 0 to 100 (positive spread = hawkish)
+        spread_score = min(100, max(0, 50 + spread * 50))
+        # dxy_change: map -0.5% to +0.5% → 0 to 100
+        dxy_score = min(100, max(0, 50 + dxy_change * 100))
+
+        # Average the three components
+        market_ftn = round((hike_prob + spread_score + dxy_score) / 3, 1)
+
+        # Label
+        if market_ftn <= 20:
+            label = "Extremely Dovish"
+        elif market_ftn <= 40:
+            label = "Dovish"
+        elif market_ftn <= 60:
+            label = "Neutral"
+        elif market_ftn <= 80:
+            label = "Hawkish"
+        else:
+            label = "Extremely Hawkish"
+
+        return market_ftn, label, {
+            "hike_prob": hike_prob,
+            "spread": spread,
+            "dxy_change": dxy_change
+        }
+    except Exception as e:
+        logging.error(f"Market FTN computation error: {e}")
+        return None, None, None
+
+@app.route('/api/market_ftn')
+def market_ftn():
+    score, label, components = compute_market_ftn()
+    if score is None:
+        return jsonify({"error": "Market data unavailable"}), 500
+    ts = datetime.datetime.utcnow().isoformat() + "Z"
+    return jsonify({
+        "index": "Market Expectation (FTN‑M)",
+        "score": score,
+        "label": label,
+        "components": components,
+        "timestamp": ts
+    })
+
 # ---------- ROUTES ----------
 @app.route('/health')
 def health():
@@ -297,13 +455,10 @@ def ping():
     score, confidence, sources = compute_daily_ftn()
     if score is None:
         return jsonify({"status": "error", "message": "No data"}), 500
-
-    # ---------- MOVING ALERT LOGIC (integrated) ----------
     current_raw = list(score_history)[-1] if score_history else None
     if current_raw is not None and last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
         if diff >= 5:
-            # Attempt to send email alert
             resend_api_key = os.environ.get("RESEND_API_KEY")
             alert_emails = os.environ.get("ALERT_EMAILS", "")
             if resend_api_key and alert_emails:
@@ -325,7 +480,7 @@ This is an automated alert. Unsubscribe by replying to this email.
                 try:
                     for email in recipients:
                         resend.Emails.send({
-                            "from": "FTN Alerts <alerts@ftone-index.resend.dev>",
+                            "from": "FTN Alerts <alerts@ftoneindex.com>",
                             "to": email,
                             "subject": subject,
                             "text": body
@@ -335,14 +490,11 @@ This is an automated alert. Unsubscribe by replying to this email.
                     logging.error(f"Failed to send alert email: {e}")
             else:
                 logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – alert skipped")
-        # Update last alerted score regardless of whether email was sent
         last_alerted_raw_score = current_raw
     elif last_alerted_raw_score is None and current_raw is not None:
-        # First run – initialise without sending alert
         last_alerted_raw_score = current_raw
-
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({"status": "ok", "score": score, "timestamp": ts, "alert_sent": False})   # alert_sent info not exposed
+    return jsonify({"status": "ok", "score": score, "timestamp": ts})
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
@@ -418,8 +570,6 @@ def auto_post():
 @app.route('/moving')
 def moving_alert():
     global last_alerted_raw_score
-    # This endpoint is now just a manual trigger – the real alert runs inside /ping
-    # We'll force a check and return the current state
     _, _, _ = compute_daily_ftn()
     current_raw = list(score_history)[-1] if score_history else None
     if current_raw is None:
