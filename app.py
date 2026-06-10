@@ -51,7 +51,6 @@ FOMC_DATES = [
 ]
 
 def is_fomc_day():
-    """Return True if today is a scheduled FOMC statement release day."""
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     return today in FOMC_DATES
 
@@ -311,6 +310,24 @@ Text:
     logging.error("No Gemini API keys configured")
     return None
 
+# ---------- FOMC SUMMARY ----------
+def summarise_text(text):
+    """Return a one‑sentence summary of the given Fed communication."""
+    if not text or not groq_client:
+        return ""
+    prompt = f"Summarise the following Federal Reserve communication in one sentence. Return ONLY the sentence, no preamble.\n\n{text[:3000]}"
+    try:
+        chat_completion = groq_client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            temperature=0.3,
+            max_tokens=80
+        )
+        return chat_completion.choices[0].message.content.strip()
+    except Exception as e:
+        logging.warning(f"Summary generation failed: {e}")
+        return ""
+
 # ---------- COMBINED PIPELINE ----------
 def compute_daily_ftn():
     all_sources = []
@@ -366,7 +383,7 @@ def compute_daily_ftn():
     return smoothed, confidence, sources_detail
 
 # ---------- ALERT SENDING HELPER ----------
-def send_alert(current_raw, last_raw, diff, direction):
+def send_alert(current_raw, last_raw, diff, direction, summary=""):
     resend_api_key = os.environ.get("RESEND_API_KEY")
     alert_emails = os.environ.get("ALERT_EMAILS", "")
     if not resend_api_key or not alert_emails:
@@ -379,7 +396,10 @@ def send_alert(current_raw, last_raw, diff, direction):
 
 Previous raw score: {last_raw:.1f}
 Current raw score:  {current_raw:.1f}
-Change: {direction} by {diff:.1f} points
+Change: {direction} by {diff:.1f} points"""
+    if summary:
+        body += f"\n\nFOMC statement summary: {summary}"
+    body += f"""
 
 Live dashboard: https://ftone-index.github.io/ftone-dashboard/
 Raw API: https://ftn-index.onrender.com/api/ftn_latest
@@ -414,14 +434,15 @@ def ping():
     if current_raw is None:
         return jsonify({"status": "ok", "score": score, "timestamp": datetime.datetime.utcnow().isoformat() + "Z"})
 
-    # Determine if we should send an alert
     if last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
         direction = "higher" if current_raw > last_alerted_raw_score else "lower"
 
-        # FOMC override: send alert regardless of move size on FOMC days
         if is_fomc_day():
-            send_alert(current_raw, last_alerted_raw_score, diff, direction)
+            # Generate FOMC summary
+            fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
+            summary = summarise_text(fomc_text) if fomc_text else ""
+            send_alert(current_raw, last_alerted_raw_score, diff, direction, summary)
         elif diff >= 5:
             send_alert(current_raw, last_alerted_raw_score, diff, direction)
 
