@@ -312,10 +312,10 @@ Text:
 
 # ---------- FOMC SUMMARY ----------
 def summarise_text(text):
-    """Return a one‑sentence summary of the given Fed communication."""
+    """Return a one‑sentence summary of the given Fed communication in present tense."""
     if not text or not groq_client:
         return ""
-    prompt = f"Summarise the following Federal Reserve communication in one sentence. Return ONLY the sentence, no preamble.\n\n{text[:3000]}"
+    prompt = f"Summarise the following Federal Reserve communication in one sentence using present tense. Return ONLY the sentence, no preamble.\n\n{text[:3000]}"
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
