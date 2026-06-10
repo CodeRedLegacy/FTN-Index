@@ -44,6 +44,17 @@ logging.basicConfig(level=logging.INFO)
 score_history = deque(maxlen=7)
 last_alerted_raw_score = None
 
+# ---------- FOMC SCHEDULE 2026 ----------
+FOMC_DATES = [
+    "2026-01-29", "2026-03-19", "2026-05-07", "2026-06-11",
+    "2026-07-30", "2026-09-17", "2026-11-05", "2026-12-16"
+]
+
+def is_fomc_day():
+    """Return True if today is a scheduled FOMC statement release day."""
+    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    return today in FOMC_DATES
+
 # ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
     r = requests.get(url, timeout=timeout)
@@ -95,7 +106,7 @@ def extract_speaker_from_url(url):
         return known.get(name, name)
     return 'Fed'
 
-# ---------- SOURCE SCRAPERS (PRIMARY ONLY) ----------
+# ---------- SOURCE SCRAPERS ----------
 def scrape_fed_speeches():
     try:
         main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/speeches.htm")
@@ -163,6 +174,61 @@ def scrape_fomc_minutes():
         return sources
     except Exception as e:
         logging.error(f"FOMC minutes scrape error: {e}")
+        return []
+
+def scrape_regional_fed_speeches():
+    try:
+        soup = fetch_soup("https://www.newyorkfed.org/newsevents/speeches")
+        items = soup.select('a[href*="speech"]')
+        sources = []
+        for a in items[:2]:
+            href = a.get('href')
+            if href:
+                full_url = "https://www.newyorkfed.org" + href if href.startswith('/') else href
+                title = a.get_text(strip=True) or "Regional Fed Speech"
+                if not any(s['url'] == full_url for s in sources):
+                    sources.append({'type': 'regional_speech', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} regional Fed speech links")
+        return sources
+    except Exception as e:
+        logging.error(f"Regional Fed speeches scrape error: {e}")
+        return []
+
+def scrape_fed_testimony():
+    try:
+        soup = fetch_soup("https://www.federalreserve.gov/newsevents/testimony.htm")
+        items = soup.select('a[href*="testimony"]')
+        sources = []
+        for a in items[:2]:
+            href = a.get('href')
+            if href:
+                full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
+                if looks_like_individual_doc(full_url):
+                    title = a.get_text(strip=True) or "Testimony"
+                    if not any(s['url'] == full_url for s in sources):
+                        sources.append({'type': 'testimony', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} testimony links")
+        return sources
+    except Exception as e:
+        logging.error(f"Testimony scrape error: {e}")
+        return []
+
+def scrape_fed_blogs():
+    try:
+        soup = fetch_soup("https://libertystreeteconomics.newyorkfed.org/")
+        items = soup.select('a[href*="libertystreeteconomics"]')
+        sources = []
+        for a in items[:2]:
+            href = a.get('href')
+            if href:
+                full_url = href if href.startswith('http') else "https://libertystreeteconomics.newyorkfed.org" + href
+                title = a.get_text(strip=True) or "Fed Blog Post"
+                if not any(s['url'] == full_url for s in sources):
+                    sources.append({'type': 'fed_blog', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} Fed blog links")
+        return sources
+    except Exception as e:
+        logging.error(f"Fed blogs scrape error: {e}")
         return []
 
 # ---------- AI SCORING ----------
@@ -251,27 +317,10 @@ def compute_daily_ftn():
     all_sources.extend(scrape_fed_speeches())
     all_sources.extend(scrape_fomc_statements())
     all_sources.extend(scrape_fomc_minutes())
-    # Fetch additional sources from FTN-Market
-    market_scores_url = os.environ.get("MARKET_SCORES_URL", "https://ftn-market.onrender.com/api/extra_scores")
-    try:
-        resp = requests.get(market_scores_url, timeout=20)
-        if resp.status_code == 200:
-            data = resp.json()
-            extra_sources = data.get("sources", [])
-            extra_scores = data.get("scores", [])
-            all_sources.extend(extra_sources)
-            # We'll score the extra documents here as well, using the same AI
-            for src in extra_sources:
-                soup = fetch_soup(src['url'])
-                text = extract_text(soup)
-                if text:
-                    score = score_text_with_ai(text)
-                    if score is not None:
-                        extra_scores.append(score)
-    except Exception as e:
-        logging.warning(f"Could not fetch extra sources from FTN-Market: {e}")
+    all_sources.extend(scrape_regional_fed_speeches())
+    all_sources.extend(scrape_fed_testimony())
+    all_sources.extend(scrape_fed_blogs())
 
-    # Now score primary sources
     scores = []
     total_chars = 0
     sources_detail = []
@@ -316,6 +365,39 @@ def compute_daily_ftn():
 
     return smoothed, confidence, sources_detail
 
+# ---------- ALERT SENDING HELPER ----------
+def send_alert(current_raw, last_raw, diff, direction):
+    resend_api_key = os.environ.get("RESEND_API_KEY")
+    alert_emails = os.environ.get("ALERT_EMAILS", "")
+    if not resend_api_key or not alert_emails:
+        logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – alert skipped")
+        return
+    resend.api_key = resend_api_key
+    recipients = [e.strip() for e in alert_emails.split(",") if e.strip()]
+    subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
+    body = f"""FTN Index has moved significantly.
+
+Previous raw score: {last_raw:.1f}
+Current raw score:  {current_raw:.1f}
+Change: {direction} by {diff:.1f} points
+
+Live dashboard: https://ftone-index.github.io/ftone-dashboard/
+Raw API: https://ftn-index.onrender.com/api/ftn_latest
+
+This is an automated alert. Unsubscribe by replying to this email.
+"""
+    try:
+        for email in recipients:
+            resend.Emails.send({
+                "from": "FTN Alerts <alerts@ftoneindex.com>",
+                "to": email,
+                "subject": subject,
+                "text": body
+            })
+        logging.info(f"Alert email sent to {len(recipients)} recipients")
+    except Exception as e:
+        logging.error(f"Failed to send alert email: {e}")
+
 # ---------- ROUTES ----------
 @app.route('/health')
 def health():
@@ -327,44 +409,23 @@ def ping():
     score, confidence, sources = compute_daily_ftn()
     if score is None:
         return jsonify({"status": "error", "message": "No data"}), 500
+
     current_raw = list(score_history)[-1] if score_history else None
-    if current_raw is not None and last_alerted_raw_score is not None:
+    if current_raw is None:
+        return jsonify({"status": "ok", "score": score, "timestamp": datetime.datetime.utcnow().isoformat() + "Z"})
+
+    # Determine if we should send an alert
+    if last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
-        if diff >= 5:
-            resend_api_key = os.environ.get("RESEND_API_KEY")
-            alert_emails = os.environ.get("ALERT_EMAILS", "")
-            if resend_api_key and alert_emails:
-                resend.api_key = resend_api_key
-                recipients = [e.strip() for e in alert_emails.split(",") if e.strip()]
-                direction = "higher" if current_raw > last_alerted_raw_score else "lower"
-                subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
-                body = f"""FTN Index has moved significantly.
+        direction = "higher" if current_raw > last_alerted_raw_score else "lower"
 
-Previous raw score: {last_alerted_raw_score:.1f}
-Current raw score:  {current_raw:.1f}
-Change: {direction} by {diff:.1f} points
+        # FOMC override: send alert regardless of move size on FOMC days
+        if is_fomc_day():
+            send_alert(current_raw, last_alerted_raw_score, diff, direction)
+        elif diff >= 5:
+            send_alert(current_raw, last_alerted_raw_score, diff, direction)
 
-Live dashboard: https://ftone-index.github.io/ftone-dashboard/
-Raw API: https://ftn-index.onrender.com/api/ftn_latest
-
-This is an automated alert. Unsubscribe by replying to this email.
-"""
-                try:
-                    for email in recipients:
-                        resend.Emails.send({
-                            "from": "FTN Alerts <alerts@ftoneindex.com>",
-                            "to": email,
-                            "subject": subject,
-                            "text": body
-                        })
-                    logging.info(f"Alert email sent to {len(recipients)} recipients")
-                except Exception as e:
-                    logging.error(f"Failed to send alert email: {e}")
-            else:
-                logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – alert skipped")
-        last_alerted_raw_score = current_raw
-    elif last_alerted_raw_score is None and current_raw is not None:
-        last_alerted_raw_score = current_raw
+    last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     return jsonify({"status": "ok", "score": score, "timestamp": ts})
 
@@ -392,11 +453,12 @@ def home():
     return "F-Tone (FTN) Federal Reserve Tone Index is live. Use /api/ftn_latest"
 
 # ---------- X AUTO‑POST ENDPOINT ----------
-def post_to_x():
+@app.route('/post_tweet')
+def auto_post():
     try:
         score, confidence, sources = compute_daily_ftn()
         if score is None:
-            return "No score available"
+            return jsonify({"status": "No score available"})
         prev = list(score_history)
         change = round(score - prev[-2], 1) if len(prev) > 1 else 0
         if change == 0:
@@ -428,34 +490,10 @@ def post_to_x():
         )
         response = client.create_tweet(text=tweet_text)
         logging.info(f"Tweet posted: {response.data['id']}")
-        return "Tweet posted successfully"
+        return jsonify({"status": "Tweet posted successfully"})
     except Exception as e:
         logging.error(f"Auto‑post failed: {e}")
-        return f"Error posting tweet: {e}"
-
-@app.route('/post_tweet')
-def auto_post():
-    result = post_to_x()
-    return jsonify({"status": result})
-
-@app.route('/moving')
-def moving_alert():
-    global last_alerted_raw_score
-    _, _, _ = compute_daily_ftn()
-    current_raw = list(score_history)[-1] if score_history else None
-    if current_raw is None:
-        return jsonify({"status": "No data"})
-    if last_alerted_raw_score is None:
-        last_alerted_raw_score = current_raw
-        return jsonify({"status": "Initialized", "current_raw": current_raw})
-    diff = abs(current_raw - last_alerted_raw_score)
-    return jsonify({
-        "status": "checked",
-        "current_raw": current_raw,
-        "last_alerted": last_alerted_raw_score,
-        "diff": diff,
-        "big_move": diff >= 5
-    })
+        return jsonify({"status": f"Error posting tweet: {e}"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
