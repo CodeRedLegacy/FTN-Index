@@ -434,21 +434,19 @@ def ping():
     if current_raw is None:
         return jsonify({"status": "ok", "score": score, "timestamp": datetime.datetime.utcnow().isoformat() + "Z"})
 
-    if last_alerted_raw_score is not None:
+    now_utc = datetime.datetime.utcnow()
+    fomc_alert_active = is_fomc_day() and now_utc.hour >= 18
+
+    if fomc_alert_active and current_raw > 0:
+        # FOMC day: always send alert with current score and summary
+        fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
+        summary = summarise_text(fomc_text) if fomc_text else ""
+        # Use the current raw score as both "previous" and "current" since this is a standalone FOMC reading
+        send_alert(current_raw, current_raw, 0.0, "unchanged", summary)
+    elif last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
         direction = "higher" if current_raw > last_alerted_raw_score else "lower"
-
-        now_utc = datetime.datetime.utcnow()
-        # FOMC override: after 18:00 UTC on FOMC days, send alert with summary if we have real data
-        fomc_alert_active = is_fomc_day() and now_utc.hour >= 18
-
-        if fomc_alert_active and current_raw > 0:
-            # Generate FOMC summary from statement text
-            fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
-            summary = summarise_text(fomc_text) if fomc_text else ""
-            # Always send on FOMC day if we have a score and summary (even if diff is 0)
-            send_alert(current_raw, last_alerted_raw_score, diff, direction, summary)
-        elif diff >= 5:
+        if diff >= 5:
             send_alert(current_raw, last_alerted_raw_score, diff, direction)
 
     last_alerted_raw_score = current_raw
