@@ -438,7 +438,11 @@ def ping():
         diff = abs(current_raw - last_alerted_raw_score)
         direction = "higher" if current_raw > last_alerted_raw_score else "lower"
 
-        if is_fomc_day():
+        # FOMC override: only after 18:00 UTC on FOMC days, and only if there's actual movement
+        now_utc = datetime.datetime.utcnow()
+        fomc_alert_active = is_fomc_day() and now_utc.hour >= 18
+
+        if fomc_alert_active and diff > 0:
             # Generate FOMC summary
             fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
             summary = summarise_text(fomc_text) if fomc_text else ""
