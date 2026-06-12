@@ -54,6 +54,9 @@ def is_fomc_day():
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     return today in FOMC_DATES
 
+# ---------- GLOBAL FOMC ALERT GUARD ----------
+fomc_alert_sent_today = False   # Reset on each deploy (or we can store in a file, but for now deploy resets it)
+
 # ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
     r = requests.get(url, timeout=timeout)
@@ -425,7 +428,7 @@ def health():
 
 @app.route('/ping')
 def ping():
-    global last_alerted_raw_score
+    global last_alerted_raw_score, fomc_alert_sent_today
     score, confidence, sources = compute_daily_ftn()
     if score is None:
         return jsonify({"status": "error", "message": "No data"}), 500
@@ -434,19 +437,26 @@ def ping():
     if current_raw is None:
         return jsonify({"status": "ok", "score": score, "timestamp": datetime.datetime.utcnow().isoformat() + "Z"})
 
-    now_utc = datetime.datetime.utcnow()
-    fomc_alert_active = is_fomc_day() and now_utc.hour >= 18
-
-    if fomc_alert_active and current_raw > 0:
-        # FOMC day: always send alert with current score and summary
-        fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
-        summary = summarise_text(fomc_text) if fomc_text else ""
-        # Use the current raw score as both "previous" and "current" since this is a standalone FOMC reading
-        send_alert(current_raw, current_raw, 0.0, "unchanged", summary)
-    elif last_alerted_raw_score is not None:
+    if last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
         direction = "higher" if current_raw > last_alerted_raw_score else "lower"
-        if diff >= 5:
+
+        now_utc = datetime.datetime.utcnow()
+        # Reset FOMC alert flag at midnight UTC
+        if now_utc.hour == 0 and now_utc.minute < 10:
+            fomc_alert_sent_today = False
+
+        # FOMC override: only once per day, after 18:00 UTC, and only if we have real content
+        fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
+
+        if fomc_active and current_raw > 0:
+            # Generate FOMC summary from statement text
+            fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
+            summary = summarise_text(fomc_text) if fomc_text else ""
+            if summary:   # Only send if we actually generated a meaningful summary
+                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary)
+                fomc_alert_sent_today = True
+        elif diff >= 5:
             send_alert(current_raw, last_alerted_raw_score, diff, direction)
 
     last_alerted_raw_score = current_raw
