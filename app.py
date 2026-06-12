@@ -43,6 +43,7 @@ logging.basicConfig(level=logging.INFO)
 
 score_history = deque(maxlen=7)
 last_alerted_raw_score = None
+last_alert_data = None
 
 # ---------- FOMC SCHEDULE 2026 ----------
 FOMC_DATES = [
@@ -54,8 +55,7 @@ def is_fomc_day():
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     return today in FOMC_DATES
 
-# ---------- GLOBAL FOMC ALERT GUARD ----------
-fomc_alert_sent_today = False   # Reset on each deploy (or we can store in a file, but for now deploy resets it)
+fomc_alert_sent_today = False
 
 # ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
@@ -385,15 +385,30 @@ def compute_daily_ftn():
 
     return smoothed, confidence, sources_detail
 
-# ---------- ALERT SENDING HELPER ----------
-def send_alert(current_raw, last_raw, diff, direction, summary=""):
+# ---------- ALERT SENDING HELPERS ----------
+def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalist_list=False, include_release_link=False):
+    global last_alert_data
     resend_api_key = os.environ.get("RESEND_API_KEY")
-    alert_emails = os.environ.get("ALERT_EMAILS", "")
-    if not resend_api_key or not alert_emails:
-        logging.warning("RESEND_API_KEY or ALERT_EMAILS not set – alert skipped")
+    if not resend_api_key:
+        logging.warning("RESEND_API_KEY not set – alert skipped")
         return
+
+    # Choose which email list to use
+    if use_journalist_list:
+        alert_emails = os.environ.get("ALERT_EMAILS_2", "")
+    else:
+        alert_emails = os.environ.get("ALERT_EMAILS", "")
+
+    if not alert_emails:
+        logging.warning("No alert emails configured")
+        return
+
     resend.api_key = resend_api_key
     recipients = [e.strip() for e in alert_emails.split(",") if e.strip()]
+    if not recipients:
+        logging.warning("No valid recipients in alert list")
+        return
+
     subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
     body = f"""FTN Index has moved significantly.
 
@@ -407,8 +422,11 @@ Change: {direction} by {diff:.1f} points"""
 Live dashboard: https://ftone-index.github.io/ftone-dashboard/
 Raw API: https://ftn-index.onrender.com/api/ftn_latest
 
-This is an automated alert. Unsubscribe by replying to this email.
-"""
+This is an automated alert. Unsubscribe by replying to this email."""
+
+    if include_release_link:
+        body += f"\n\nTo release this alert to the journalist list, visit:\nhttps://ftn-index.onrender.com/send_alert"
+
     try:
         for email in recipients:
             resend.Emails.send({
@@ -417,7 +435,15 @@ This is an automated alert. Unsubscribe by replying to this email.
                 "subject": subject,
                 "text": body
             })
-        logging.info(f"Alert email sent to {len(recipients)} recipients")
+        logging.info(f"Alert email sent to {len(recipients)} recipients (journalist list: {use_journalist_list})")
+        # Store for possible re‑send
+        last_alert_data = {
+            "current_raw": current_raw,
+            "last_raw": last_raw,
+            "diff": diff,
+            "direction": direction,
+            "summary": summary
+        }
     except Exception as e:
         logging.error(f"Failed to send alert email: {e}")
 
@@ -442,22 +468,19 @@ def ping():
         direction = "higher" if current_raw > last_alerted_raw_score else "lower"
 
         now_utc = datetime.datetime.utcnow()
-        # Reset FOMC alert flag at midnight UTC
         if now_utc.hour == 0 and now_utc.minute < 10:
             fomc_alert_sent_today = False
 
-        # FOMC override: only once per day, after 18:00 UTC, and only if we have real content
         fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
 
         if fomc_active and current_raw > 0:
-            # Generate FOMC summary from statement text
             fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
             summary = summarise_text(fomc_text) if fomc_text else ""
-            if summary:   # Only send if we actually generated a meaningful summary
-                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary)
+            if summary:
+                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, include_release_link=True)
                 fomc_alert_sent_today = True
         elif diff >= 5:
-            send_alert(current_raw, last_alerted_raw_score, diff, direction)
+            send_alert(current_raw, last_alerted_raw_score, diff, direction, use_journalist_list=False, include_release_link=True)
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
@@ -485,6 +508,23 @@ def ftn_latest():
 @app.route('/')
 def home():
     return "F-Tone (FTN) Federal Reserve Tone Index is live. Use /api/ftn_latest"
+
+# ---------- RE‑SEND LAST ALERT TO JOURNALIST LIST ----------
+@app.route('/send_alert')
+def resend_alert():
+    global last_alert_data
+    if not last_alert_data:
+        return jsonify({"status": "No alert data to re‑send"}), 400
+    send_alert(
+        last_alert_data["current_raw"],
+        last_alert_data["last_raw"],
+        last_alert_data["diff"],
+        last_alert_data["direction"],
+        last_alert_data["summary"],
+        use_journalist_list=True,
+        include_release_link=False
+    )
+    return jsonify({"status": "Alert re‑sent to journalist list"})
 
 # ---------- X AUTO‑POST ENDPOINT ----------
 @app.route('/post_tweet')
