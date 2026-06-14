@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO)
 
 score_history = deque(maxlen=7)
 last_alerted_raw_score = None
-last_alert_data = None
+last_alert_data = None          # stored for /send_alert manual re‑send
 
 # ---------- FOMC SCHEDULE 2026 ----------
 FOMC_DATES = [
@@ -54,6 +54,12 @@ FOMC_DATES = [
 def is_fomc_day():
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
     return today in FOMC_DATES
+
+def get_fomc_statement_url():
+    """Return the expected FOMC statement URL for today, if today is a FOMC day."""
+    today = datetime.datetime.utcnow()
+    date_str = today.strftime("%Y%m%d")
+    return f"https://www.federalreserve.gov/newsevents/pressreleases/monetary{date_str}a.htm"
 
 fomc_alert_sent_today = False
 
@@ -133,6 +139,21 @@ def scrape_fed_speeches():
         return []
 
 def scrape_fomc_statements():
+    sources = []
+    if is_fomc_day():
+        statement_url = get_fomc_statement_url()
+        try:
+            r = requests.get(statement_url, timeout=10)
+            if r.status_code == 200:
+                sources.append({
+                    'type': 'fomc_statement',
+                    'title': 'FOMC Statement',
+                    'url': statement_url
+                })
+                logging.info(f"FOMC statement fetched directly: {statement_url}")
+        except Exception as e:
+            logging.warning(f"Direct FOMC statement fetch failed: {e}")
+
     try:
         main_soup = fetch_soup("https://www.federalreserve.gov/newsevents/pressreleases.htm")
         archive_url = get_current_year_archive(main_soup,
@@ -140,20 +161,18 @@ def scrape_fomc_statements():
                                                "-press")
         soup = fetch_soup(archive_url)
         items = soup.select('a[href*="/pressrelease"]')
-        sources = []
         for a in items[:2]:
             href = a.get('href')
             if href:
                 full_url = "https://www.federalreserve.gov" + href if href.startswith('/') else href
-                if looks_like_individual_doc(full_url):
+                if looks_like_individual_doc(full_url) and not any(s['url'] == full_url for s in sources):
                     title = a.get_text(strip=True) or "FOMC Statement"
-                    if not any(s['url'] == full_url for s in sources):
-                        sources.append({'type': 'fomc_statement', 'title': title, 'url': full_url})
-        logging.info(f"Scraped {len(sources)} FOMC statement links")
-        return sources
+                    sources.append({'type': 'fomc_statement', 'title': title, 'url': full_url})
+        logging.info(f"Scraped {len(sources)} FOMC statement links (total)")
     except Exception as e:
         logging.error(f"FOMC statements scrape error: {e}")
-        return []
+
+    return sources[:2]
 
 def scrape_fomc_minutes():
     try:
@@ -385,15 +404,47 @@ def compute_daily_ftn():
 
     return smoothed, confidence, sources_detail
 
+# ---------- ALERT VALIDATION ----------
+def validate_alert(is_fomc, diff, current_raw, sources, summary):
+    """
+    Returns True if the alert should be sent to journalists.
+    Returns False if the alert is likely noise and should only go to you.
+    """
+    if is_fomc:
+        # Must have at least one FOMC statement in sources
+        has_statement = any('fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower() for s in sources)
+        # Must have a non‑empty summary (meaning we actually scraped and summarised the statement)
+        has_summary = bool(summary and summary.strip())
+        # Raw score must be > 0 (not an empty pipeline)
+        has_score = current_raw > 0
+        return has_statement and has_summary and has_score
+    else:
+        # Regular alert: must be a genuine ≥ 5‑point move
+        if diff < 5:
+            return False
+        # At least 3 sources to avoid single‑document noise
+        if len(sources) < 3:
+            return False
+        # Confidence must not be LOW
+        num_sources = len(sources)
+        total_chars = sum(s.get('chars', 0) for s in sources)
+        confidence = "LOW"
+        if num_sources >= 4 and total_chars > 8000:
+            confidence = "HIGH"
+        elif num_sources >= 2 and total_chars > 3000:
+            confidence = "MEDIUM"
+        if confidence == "LOW":
+            return False
+        return True
+
 # ---------- ALERT SENDING HELPERS ----------
-def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalist_list=False, include_release_link=False):
+def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalist_list=False, blocked=False):
     global last_alert_data
     resend_api_key = os.environ.get("RESEND_API_KEY")
     if not resend_api_key:
         logging.warning("RESEND_API_KEY not set – alert skipped")
         return
 
-    # Choose which email list to use
     if use_journalist_list:
         alert_emails = os.environ.get("ALERT_EMAILS_2", "")
     else:
@@ -410,6 +461,9 @@ def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalis
         return
 
     subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
+    if blocked:
+        subject = f"[BLOCKED] {subject}"
+
     body = f"""FTN Index has moved significantly.
 
 Previous raw score: {last_raw:.1f}
@@ -417,15 +471,14 @@ Current raw score:  {current_raw:.1f}
 Change: {direction} by {diff:.1f} points"""
     if summary:
         body += f"\n\nFOMC statement summary: {summary}"
+    if blocked:
+        body += "\n\n⚠️ This alert was automatically blocked from being sent to journalists because it did not pass validation checks. It is only sent to you for review."
     body += f"""
 
 Live dashboard: https://ftone-index.github.io/ftone-dashboard/
 Raw API: https://ftn-index.onrender.com/api/ftn_latest
 
 This is an automated alert. Unsubscribe by replying to this email."""
-
-    if include_release_link:
-        body += f"\n\nTo release this alert to the journalist list, visit:\nhttps://ftn-index.onrender.com/send_alert"
 
     try:
         for email in recipients:
@@ -435,8 +488,8 @@ This is an automated alert. Unsubscribe by replying to this email."""
                 "subject": subject,
                 "text": body
             })
-        logging.info(f"Alert email sent to {len(recipients)} recipients (journalist list: {use_journalist_list})")
-        # Store for possible re‑send
+        logging.info(f"Alert email sent to {len(recipients)} recipients (journalist list: {use_journalist_list}, blocked: {blocked})")
+        # Store for possible manual re‑send via /send_alert
         last_alert_data = {
             "current_raw": current_raw,
             "last_raw": last_raw,
@@ -473,14 +526,35 @@ def ping():
 
         fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
 
+        # Determine if this is an alert situation
+        alert_triggered = False
+        is_fomc_alert = False
         if fomc_active and current_raw > 0:
-            fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
-            summary = summarise_text(fomc_text) if fomc_text else ""
-            if summary:
-                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, include_release_link=True)
-                fomc_alert_sent_today = True
+            is_fomc_alert = True
+            alert_triggered = True
         elif diff >= 5:
-            send_alert(current_raw, last_alerted_raw_score, diff, direction, use_journalist_list=False, include_release_link=True)
+            alert_triggered = True
+
+        if alert_triggered:
+            # Generate FOMC summary if applicable
+            summary = ""
+            if is_fomc_alert:
+                fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
+                summary = summarise_text(fomc_text) if fomc_text else ""
+
+            # Validate the alert
+            valid = validate_alert(is_fomc_alert, diff, current_raw, sources, summary)
+
+            if valid:
+                # Send to journalists (ALERT_EMAILS_2) and you (ALERT_EMAILS)
+                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=True, blocked=False)
+                # Also send a copy to yourself via ALERT_EMAILS for confirmation
+                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, blocked=False)
+                if is_fomc_alert:
+                    fomc_alert_sent_today = True
+            else:
+                # Blocked: send only to you with a warning
+                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, blocked=True)
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
@@ -509,7 +583,7 @@ def ftn_latest():
 def home():
     return "F-Tone (FTN) Federal Reserve Tone Index is live. Use /api/ftn_latest"
 
-# ---------- RE‑SEND LAST ALERT TO JOURNALIST LIST ----------
+# ---------- RE‑SEND LAST ALERT TO JOURNALIST LIST (manual override) ----------
 @app.route('/send_alert')
 def resend_alert():
     global last_alert_data
@@ -522,7 +596,7 @@ def resend_alert():
         last_alert_data["direction"],
         last_alert_data["summary"],
         use_journalist_list=True,
-        include_release_link=False
+        blocked=False
     )
     return jsonify({"status": "Alert re‑sent to journalist list"})
 
