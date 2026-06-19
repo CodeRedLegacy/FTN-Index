@@ -9,6 +9,7 @@ import re
 import logging
 import tweepy
 import resend
+from datetime import datetime as dt
 
 # ---------- AI PROVIDERS ----------
 from groq import Groq
@@ -41,9 +42,61 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
-score_history = deque(maxlen=7)
-last_alerted_raw_score = None
-last_alert_data = None          # stored for /send_alert manual re‑send
+# ---------- PERSISTENT HISTORY HELPER ----------
+def get_daily_average_scores(days=7):
+    """
+    Fetch the historical CSV from GitHub, group rows by date (YYYY-MM-DD),
+    compute the daily average of raw scores, and return the last 'days' daily averages
+    as a list of floats (oldest first).
+    """
+    csv_url = "https://raw.githubusercontent.com/ftone-index/ftn-history/main/ftn_log.csv"
+    try:
+        resp = requests.get(csv_url, timeout=10)
+        if resp.status_code != 200:
+            logging.warning("Could not fetch CSV for historical smoothing")
+            return []
+        
+        lines = resp.text.strip().split('\n')
+        if not lines:
+            return []
+        
+        # Skip header if present
+        if 'timestamp' in lines[0].lower():
+            lines = lines[1:]
+        
+        # Group raw scores by date (YYYY-MM-DD)
+        daily_scores = {}
+        for line in lines:
+            parts = line.split(',')
+            if len(parts) < 3:
+                continue
+            try:
+                ts = parts[0].strip()
+                # raw_score is at index 2; fallback to score at index 1
+                raw_str = parts[2].strip() if len(parts) > 2 and parts[2].strip() else parts[1].strip()
+                raw = float(raw_str)
+                date_key = ts[:10]  # YYYY-MM-DD
+                if date_key not in daily_scores:
+                    daily_scores[date_key] = []
+                daily_scores[date_key].append(raw)
+            except (ValueError, IndexError) as e:
+                logging.warning(f"Skipping malformed CSV line: {line[:50]}...")
+                continue
+        
+        # Sort dates and compute daily averages
+        sorted_dates = sorted(daily_scores.keys())
+        daily_avgs = []
+        for d in sorted_dates:
+            day_scores = daily_scores[d]
+            if day_scores:
+                daily_avgs.append(sum(day_scores) / len(day_scores))
+        
+        # Return the last 'days' daily averages (or all if fewer)
+        return daily_avgs[-days:] if daily_avgs else []
+    
+    except Exception as e:
+        logging.error(f"Failed to fetch historical scores: {e}")
+        return []
 
 # ---------- FOMC SCHEDULE 2026 ----------
 FOMC_DATES = [
@@ -56,7 +109,6 @@ def is_fomc_day():
     return today in FOMC_DATES
 
 def get_fomc_statement_url():
-    """Return the expected FOMC statement URL for today, if today is a FOMC day."""
     today = datetime.datetime.utcnow()
     date_str = today.strftime("%Y%m%d")
     return f"https://www.federalreserve.gov/newsevents/pressreleases/monetary{date_str}a.htm"
@@ -65,17 +117,30 @@ fomc_alert_sent_today = False
 
 # ---------- HELPERS ----------
 def fetch_soup(url, timeout=10):
-    r = requests.get(url, timeout=timeout)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    r = requests.get(url, timeout=timeout, headers=headers)
     return BeautifulSoup(r.text, 'html.parser')
 
 def extract_text(soup, max_chars=4000):
-    for selector in ['article', 'div#content', 'body']:
-        if selector == 'div#content':
-            tag = soup.find('div', id='content')
-        else:
-            tag = soup.select_one(selector)
+    # Try common content containers
+    for selector in ['article', 'div#content', 'div.content', 'main', 'div.article-body', 'div.story-body']:
+        tag = soup.select_one(selector)
         if tag:
-            return tag.get_text()[:max_chars]
+            text = tag.get_text(separator=' ', strip=True)
+            if len(text) > 100:
+                return text[:max_chars]
+    # Fallback: get all paragraph text
+    paragraphs = soup.find_all('p')
+    if paragraphs:
+        text = ' '.join([p.get_text(strip=True) for p in paragraphs])
+        if len(text) > 100:
+            return text[:max_chars]
+    # Ultimate fallback: just get the body text
+    body = soup.find('body')
+    if body:
+        return body.get_text(separator=' ', strip=True)[:max_chars]
     return ""
 
 def get_current_year_archive(main_soup, base_url, keyword):
@@ -278,8 +343,6 @@ Text:
                 return max(0, min(100, score))
         except Exception as e:
             logging.warning(f"Groq failed ({e}), falling back to Gemini-1...")
-    else:
-        logging.info("Groq client not available, skipping to Gemini...")
     if GEMINI_KEY_1:
         try:
             gemini_client = genai.Client(api_key=GEMINI_KEY_1)
@@ -334,7 +397,6 @@ Text:
 
 # ---------- FOMC SUMMARY ----------
 def summarise_text(text):
-    """Return a one‑sentence summary of the given Fed communication in present tense."""
     if not text or not groq_client:
         return ""
     prompt = f"Summarise the following Federal Reserve communication in one sentence using present tense. Return ONLY the sentence, no preamble.\n\n{text[:3000]}"
@@ -388,11 +450,16 @@ def compute_daily_ftn():
         return None, None, []
 
     raw = sum(scores) / len(scores)
-    if len(score_history) > 0:
-        smoothed = round(sum(score_history) / len(score_history), 1)
+    
+    # Get daily averages from CSV history
+    daily_avgs = get_daily_average_scores(days=7)
+    
+    # If we have at least 7 days of history, use the average of the last 7 daily averages
+    if len(daily_avgs) >= 7:
+        smoothed = round(sum(daily_avgs) / len(daily_avgs), 1)
     else:
+        # Not enough history yet – fallback to raw
         smoothed = round(raw, 1)
-    score_history.append(raw)
 
     num_sources = len(sources_detail)
     if num_sources >= 4 and total_chars > 8000:
@@ -402,30 +469,20 @@ def compute_daily_ftn():
     else:
         confidence = "LOW"
 
-    return smoothed, confidence, sources_detail
+    return smoothed, confidence, sources_detail, raw
 
 # ---------- ALERT VALIDATION ----------
 def validate_alert(is_fomc, diff, current_raw, sources, summary):
-    """
-    Returns True if the alert should be sent to journalists.
-    Returns False if the alert is likely noise and should only go to you.
-    """
     if is_fomc:
-        # Must have at least one FOMC statement in sources
         has_statement = any('fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower() for s in sources)
-        # Must have a non‑empty summary (meaning we actually scraped and summarised the statement)
         has_summary = bool(summary and summary.strip())
-        # Raw score must be > 0 (not an empty pipeline)
         has_score = current_raw > 0
         return has_statement and has_summary and has_score
     else:
-        # Regular alert: must be a genuine ≥ 5‑point move
         if diff < 5:
             return False
-        # At least 3 sources to avoid single‑document noise
         if len(sources) < 3:
             return False
-        # Confidence must not be LOW
         num_sources = len(sources)
         total_chars = sum(s.get('chars', 0) for s in sources)
         confidence = "LOW"
@@ -489,7 +546,6 @@ This is an automated alert. Unsubscribe by replying to this email."""
                 "text": body
             })
         logging.info(f"Alert email sent to {len(recipients)} recipients (journalist list: {use_journalist_list}, blocked: {blocked})")
-        # Store for possible manual re‑send via /send_alert
         last_alert_data = {
             "current_raw": current_raw,
             "last_raw": last_raw,
@@ -500,6 +556,8 @@ This is an automated alert. Unsubscribe by replying to this email."""
     except Exception as e:
         logging.error(f"Failed to send alert email: {e}")
 
+last_alert_data = None
+
 # ---------- ROUTES ----------
 @app.route('/health')
 def health():
@@ -508,13 +566,10 @@ def health():
 @app.route('/ping')
 def ping():
     global last_alerted_raw_score, fomc_alert_sent_today
-    score, confidence, sources = compute_daily_ftn()
-    if score is None:
+    result = compute_daily_ftn()
+    if result[0] is None:
         return jsonify({"status": "error", "message": "No data"}), 500
-
-    current_raw = list(score_history)[-1] if score_history else None
-    if current_raw is None:
-        return jsonify({"status": "ok", "score": score, "timestamp": datetime.datetime.utcnow().isoformat() + "Z"})
+    score, confidence, sources, current_raw = result
 
     if last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
@@ -526,7 +581,6 @@ def ping():
 
         fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
 
-        # Determine if this is an alert situation
         alert_triggered = False
         is_fomc_alert = False
         if fomc_active and current_raw > 0:
@@ -536,38 +590,43 @@ def ping():
             alert_triggered = True
 
         if alert_triggered:
-            # Generate FOMC summary if applicable
             summary = ""
             if is_fomc_alert:
                 fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
                 summary = summarise_text(fomc_text) if fomc_text else ""
 
-            # Validate the alert
             valid = validate_alert(is_fomc_alert, diff, current_raw, sources, summary)
 
             if valid:
-                # Send to journalists (ALERT_EMAILS_2) and you (ALERT_EMAILS)
                 send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=True, blocked=False)
-                # Also send a copy to yourself via ALERT_EMAILS for confirmation
                 send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, blocked=False)
                 if is_fomc_alert:
                     fomc_alert_sent_today = True
             else:
-                # Blocked: send only to you with a warning
                 send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, blocked=True)
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     return jsonify({"status": "ok", "score": score, "timestamp": ts})
 
+last_alerted_raw_score = None
+
 @app.route('/api/ftn_latest')
 def ftn_latest():
-    score, confidence, sources = compute_daily_ftn()
-    if score is None:
+    result = compute_daily_ftn()
+    if result[0] is None:
         return jsonify({"error": "No data available"}), 500
-    prev = list(score_history)
-    change = round(score - prev[-2], 1) if len(prev) > 1 else 0
-    raw_score = prev[-1] if prev else score
+    score, confidence, sources, raw_score = result
+
+    # Calculate change from yesterday's smoothed score
+    daily_avgs = get_daily_average_scores(days=7)
+    if len(daily_avgs) >= 7:
+        # Yesterday's smoothed = average of the first 6 of the last 7 daily averages
+        prev_smoothed = round(sum(daily_avgs[:-1]) / len(daily_avgs[:-1]), 1)
+        change = round(score - prev_smoothed, 1)
+    else:
+        change = 0
+
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     return jsonify({
         "index": "F-Tone (FTN)",
@@ -583,7 +642,7 @@ def ftn_latest():
 def home():
     return "F-Tone (FTN) Federal Reserve Tone Index is live. Use /api/ftn_latest"
 
-# ---------- RE‑SEND LAST ALERT TO JOURNALIST LIST (manual override) ----------
+# ---------- RE‑SEND LAST ALERT ----------
 @app.route('/send_alert')
 def resend_alert():
     global last_alert_data
@@ -600,21 +659,29 @@ def resend_alert():
     )
     return jsonify({"status": "Alert re‑sent to journalist list"})
 
-# ---------- X AUTO‑POST ENDPOINT ----------
+# ---------- X AUTO‑POST ----------
 @app.route('/post_tweet')
 def auto_post():
     try:
-        score, confidence, sources = compute_daily_ftn()
-        if score is None:
+        result = compute_daily_ftn()
+        if result[0] is None:
             return jsonify({"status": "No score available"})
-        prev = list(score_history)
-        change = round(score - prev[-2], 1) if len(prev) > 1 else 0
+        score, confidence, sources, raw_score = result
+
+        daily_avgs = get_daily_average_scores(days=7)
+        if len(daily_avgs) >= 7:
+            prev_smoothed = round(sum(daily_avgs[:-1]) / len(daily_avgs[:-1]), 1)
+            change = round(score - prev_smoothed, 1)
+        else:
+            change = 0
+
         if change == 0:
             arrow = "—"
         elif change > 0:
             arrow = f"▲{abs(change)}"
         else:
             arrow = f"▼{abs(change)}"
+
         if score <= 20:
             label = "Extremely Dovish"
         elif score <= 40:
@@ -625,6 +692,7 @@ def auto_post():
             label = "Hawkish"
         else:
             label = "Extremely Hawkish"
+
         sources_count = len(sources) if sources else 0
         tweet_text = (
             f"🏛️ FTN today: {score} {arrow} — {label}\n"
