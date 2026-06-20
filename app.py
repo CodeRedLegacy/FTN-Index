@@ -9,6 +9,7 @@ import re
 import logging
 import tweepy
 import resend
+import openai
 from datetime import datetime as dt
 
 # ---------- AI PROVIDERS ----------
@@ -37,6 +38,11 @@ from google import genai
 GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
 GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2")
 GEMINI_KEY_3 = os.environ.get("GEMINI_API_KEY_3")
+
+# ---------- ADDITIONAL AI PROVIDERS ----------
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 app = Flask(__name__)
 CORS(app)
@@ -390,9 +396,55 @@ Text:
                 logging.info(f"AI score (Gemini-3): {score}")
                 return max(0, min(100, score))
         except Exception as e:
-            logging.error(f"All AI providers failed: {e}")
+            logging.warning(f"Gemini-3 failed ({e}), falling back to DeepSeek...")
+    
+    # Tier 5: DeepSeek
+    if DEEPSEEK_API_KEY and DEEPSEEK_API_KEY.strip():
+        try:
+            deepseek_client = openai.OpenAI(
+                api_key=DEEPSEEK_API_KEY,
+                base_url="https://api.deepseek.com/v1"
+            )
+            response = deepseek_client.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=5
+            )
+            score_str = response.choices[0].message.content.strip()
+            digits = re.findall(r'\d+', score_str)
+            if digits:
+                score = int(digits[0])
+                logging.info(f"AI score (DeepSeek): {score}")
+                return max(0, min(100, score))
+        except Exception as e:
+            logging.warning(f"DeepSeek failed ({e}), falling back to OpenRouter...")
+    
+    # Tier 6: OpenRouter
+    if OPENROUTER_API_KEY and OPENROUTER_API_KEY.strip():
+        try:
+            openrouter_client = openai.OpenAI(
+                api_key=OPENROUTER_API_KEY,
+                base_url=OPENROUTER_BASE_URL
+            )
+            response = openrouter_client.chat.completions.create(
+                model="openai/gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=5
+            )
+            score_str = response.choices[0].message.content.strip()
+            digits = re.findall(r'\d+', score_str)
+            if digits:
+                score = int(digits[0])
+                logging.info(f"AI score (OpenRouter): {score}")
+                return max(0, min(100, score))
+        except Exception as e:
+            logging.error(f"OpenRouter failed ({e})")
             return None
-    logging.error("No Gemini API keys configured")
+
+    # If we've made it here, all AI providers have failed
+    logging.error("All AI providers failed (Groq, Gemini 1-3, DeepSeek, OpenRouter)")
     return None
 
 # ---------- FOMC SUMMARY ----------
@@ -447,7 +499,7 @@ def compute_daily_ftn():
             logging.error(f"Error processing {src['url']}: {e}")
 
     if not scores:
-        return None, None, []
+        return None, None, [], None
 
     raw = sum(scores) / len(scores)
     
