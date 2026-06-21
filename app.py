@@ -640,7 +640,7 @@ def ping():
             alert_triggered = True
         elif diff >= 5:
             alert_triggered = True
-
+        alert_triggered = True  # FORCED FOR TEST
         if alert_triggered:
             summary = ""
             if is_fomc_alert:
