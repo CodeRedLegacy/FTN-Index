@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 import os
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 import datetime
 from collections import deque
@@ -47,6 +47,36 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
+
+# ---------- TRIAL KEY VALIDATION ----------
+# Store valid keys and their expiration dates
+# Format: {"key": "expiration_date"} where expiration_date is ISO format (YYYY-MM-DD)
+# You can add/remove keys manually here. For production, move to a file or database.
+VALID_TRIAL_KEYS = {
+    "trial_abc123xyz": "2026-08-27",  # 60 days from now
+    # Add more keys here as you generate them
+    # Example: "trial_xyz789": "2026-09-01"
+}
+
+@app.route('/api/validate_trial')
+def validate_trial():
+    """Validate a trial key. Returns {'valid': True/False, 'reason': '...'}"""
+    key = request.args.get('key')
+    if not key:
+        return jsonify({"valid": False, "reason": "No key provided"}), 400
+    
+    if key not in VALID_TRIAL_KEYS:
+        return jsonify({"valid": False, "reason": "Invalid key"}), 200
+    
+    expiry_date_str = VALID_TRIAL_KEYS[key]
+    try:
+        expiry_date = datetime.datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
+        today = datetime.datetime.utcnow().date()
+        if today > expiry_date:
+            return jsonify({"valid": False, "reason": "Key expired"}), 200
+        return jsonify({"valid": True, "reason": "Active"}), 200
+    except ValueError:
+        return jsonify({"valid": False, "reason": "Invalid expiry format"}), 500
 
 # ---------- PERSISTENT HISTORY HELPER ----------
 def get_daily_average_scores(days=7):
