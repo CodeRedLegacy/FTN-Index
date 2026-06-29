@@ -10,6 +10,7 @@ import logging
 import tweepy
 import resend
 import openai
+import json
 from datetime import datetime as dt
 
 # ---------- AI PROVIDERS ----------
@@ -49,14 +50,8 @@ CORS(app)
 logging.basicConfig(level=logging.INFO)
 
 # ---------- TRIAL KEY VALIDATION ----------
-# Store valid keys and their expiration dates
-# Format: {"key": "expiration_date"} where expiration_date is ISO format (YYYY-MM-DD)
-# You can add/remove keys manually here. For production, move to a file or database.
-VALID_TRIAL_KEYS = {
-    "trial_abc123xyz": "2026-08-27",  # 60 days from now
-    # Add more keys here as you generate them
-    # Example: "trial_xyz789": "2026-09-01"
-}
+# Valid trial keys are stored as a JSON object in the VALID_TRIAL_KEYS environment variable
+# Format: {"key1": "YYYY-MM-DD", "key2": "YYYY-MM-DD"}
 
 @app.route('/api/validate_trial')
 def validate_trial():
@@ -64,11 +59,18 @@ def validate_trial():
     key = request.args.get('key')
     if not key:
         return jsonify({"valid": False, "reason": "No key provided"}), 400
-    
-    if key not in VALID_TRIAL_KEYS:
+
+    valid_keys_json = os.environ.get("VALID_TRIAL_KEYS", "{}")
+    try:
+        valid_keys = json.loads(valid_keys_json)
+    except json.JSONDecodeError:
+        logging.error("Invalid VALID_TRIAL_KEYS format")
+        return jsonify({"valid": False, "reason": "Server configuration error"}), 500
+
+    if key not in valid_keys:
         return jsonify({"valid": False, "reason": "Invalid key"}), 200
-    
-    expiry_date_str = VALID_TRIAL_KEYS[key]
+
+    expiry_date_str = valid_keys[key]
     try:
         expiry_date = datetime.datetime.strptime(expiry_date_str, "%Y-%m-%d").date()
         today = datetime.datetime.utcnow().date()
@@ -77,6 +79,98 @@ def validate_trial():
         return jsonify({"valid": True, "reason": "Active"}), 200
     except ValueError:
         return jsonify({"valid": False, "reason": "Invalid expiry format"}), 500
+
+# ---------- PROSPECT OUTREACH ----------
+def generate_prospect_email(name, company):
+    """Generate the prospect outreach email body."""
+    return f"""
+Dear {name},
+
+I am writing to introduce you to the FTN Index — a daily, AI-powered gauge of Federal Reserve tone on a 0–100 scale, from dovish to hawkish.
+
+The index scrapes Fed speeches, FOMC statements, and minutes, scores each document using a chain of free LLM APIs (Groq, Gemini, DeepSeek, OpenRouter), smooths the results with a 7-day moving average, and publishes the score with confidence, sources, and methodology on a public dashboard.
+
+**What makes it different:**
+- **Market Expectation** — a companion score derived from Treasury yields (2-year and 2y/10y spread) and the US Dollar Index (DXY), showing what markets are pricing in.
+- **Fed policy rates** — the actual Fed Funds target range, IORB rate, and ON RRP rate, displayed alongside the sentiment score for direct comparison.
+- **Radical transparency** — every score is linked to its source document.
+- **FOMC alert system** — automated alerts on significant moves (fully tested and reliable).
+
+The dashboard is live and free to explore:
+https://ftone-index.github.io/ftone-dashboard/
+
+If you are interested, I would be happy to give you a personal walkthrough or answer any questions.
+
+Best regards,
+Eduardo
+@FToneIndex on X
+"""
+
+@app.route('/send_prospect_emails')
+def send_prospect_emails():
+    """Send outreach emails to prospects using Resend.
+    Trigger this manually via browser or curl.
+    Security: requires a secret key passed as a query parameter.
+    """
+    # Security check
+    secret_key = request.args.get('key')
+    expected_key = os.environ.get("OUTREACH_KEY", "secret")
+    if secret_key != expected_key:
+        return jsonify({"error": "Invalid or missing security key"}), 403
+
+    # Get the prospect list from environment variable
+    prospects_json = os.environ.get("PROSPECTS")
+    if not prospects_json:
+        return jsonify({"error": "No prospects configured"}), 500
+
+    try:
+        prospects = json.loads(prospects_json)
+    except json.JSONDecodeError:
+        logging.error("Invalid PROSPECTS format")
+        return jsonify({"error": "Invalid prospects format"}), 500
+
+    # Validate Resend API key
+    resend_api_key = os.environ.get("RESEND_API_KEY")
+    if not resend_api_key:
+        return jsonify({"error": "RESEND_API_KEY not set"}), 500
+
+    resend.api_key = resend_api_key
+
+    # Send emails
+    sent = 0
+    failed = 0
+    errors = []
+
+    for prospect in prospects:
+        name = prospect.get('name', '')
+        email = prospect.get('email', '')
+        company = prospect.get('company', '')
+
+        if not name or not email:
+            logging.warning(f"Skipping prospect: missing name or email — {prospect}")
+            continue
+
+        try:
+            response = resend.Emails.send({
+                "from": "FTN Index <alerts@ftoneindex.com>",
+                "to": email,
+                "subject": "FTN Index — real-time Fed sentiment, Market Expectation, and Fed policy rates",
+                "text": generate_prospect_email(name, company)
+            })
+            sent += 1
+            logging.info(f"Email sent to {name} ({email}) — ID: {response.get('id', 'N/A')}")
+        except Exception as e:
+            failed += 1
+            error_msg = f"Failed to send to {email}: {e}"
+            errors.append(error_msg)
+            logging.error(error_msg)
+
+    return jsonify({
+        "status": "Outreach completed",
+        "sent": sent,
+        "failed": failed,
+        "errors": errors if errors else None
+    })
 
 # ---------- PERSISTENT HISTORY HELPER ----------
 def get_daily_average_scores(days=7):
