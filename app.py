@@ -172,6 +172,39 @@ def send_prospect_emails():
         "errors": errors if errors else None
     })
 
+# ---------- HISTORICAL CSV EXPORT ----------
+@app.route('/api/historical_csv')
+def historical_csv():
+    """Return the historical FTN CSV file if a valid trial key is provided."""
+    key = request.args.get('key')
+    if not key:
+        return jsonify({"error": "Missing trial key"}), 400
+
+    # Validate the key
+    valid_keys_json = os.environ.get("VALID_TRIAL_KEYS", "{}")
+    try:
+        valid_keys = json.loads(valid_keys_json)
+    except json.JSONDecodeError:
+        return jsonify({"error": "Server configuration error"}), 500
+
+    if key not in valid_keys:
+        return jsonify({"error": "Invalid or expired key"}), 403
+
+    # Fetch the CSV from GitHub
+    csv_url = "https://raw.githubusercontent.com/ftone-index/ftn-history/main/ftn_log.csv"
+    try:
+        resp = requests.get(csv_url, timeout=10)
+        if resp.status_code != 200:
+            return jsonify({"error": "Could not retrieve historical data"}), 500
+        
+        # Return as a downloadable CSV file
+        return resp.text, 200, {
+            'Content-Type': 'text/csv',
+            'Content-Disposition': 'attachment; filename=ftn_history.csv'
+        }
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ---------- PERSISTENT HISTORY HELPER ----------
 def get_daily_average_scores(days=7):
     """
@@ -789,6 +822,22 @@ last_alerted_raw_score = None
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
+    # Check for trial key to allow API access
+    key = request.args.get('key')
+    if key:
+        valid_keys_json = os.environ.get("VALID_TRIAL_KEYS", "{}")
+        try:
+            valid_keys = json.loads(valid_keys_json)
+        except:
+            valid_keys = {}
+        
+        if key not in valid_keys:
+            # If the key is invalid, we still return the score, but we don't add the "pro" flag.
+            pass
+        else:
+            # Key is valid – we can optionally log this access or add a flag.
+            logging.info(f"API accessed with trial key: {key}")
+
     result = compute_daily_ftn()
     if result[0] is None:
         return jsonify({"error": "No data available"}), 500
