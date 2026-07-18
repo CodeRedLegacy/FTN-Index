@@ -822,7 +822,7 @@ def ping():
     if now_utc.hour == 0 and now_utc.minute < 10:
         fomc_alert_sent_today = False
 
-    fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
+    fomc_active = is_fomc_day() and now_utc.hour >= 0 and not fomc_alert_sent_today
 
     # --- FOMC Alert (Independent of last_alerted_raw_score) ---
     if fomc_active and current_raw > 0:
