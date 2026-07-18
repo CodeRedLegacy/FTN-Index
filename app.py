@@ -892,7 +892,9 @@ def ping():
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({"status": "ok", "score": score, "timestamp": ts})last_alerted_raw_score = None
+    return jsonify({"status": "ok", "score": score, "timestamp": ts})
+
+last_alerted_raw_score = None
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
