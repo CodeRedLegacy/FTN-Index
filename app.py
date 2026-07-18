@@ -828,11 +828,7 @@ def ping():
     # --- FOMC Alert (Independent of last_alerted_raw_score) ---
     if fomc_active and current_raw > 0:
         try:
-            fomc_text = " ".join([
-                s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000)
-                for s in sources
-                if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()
-            ])
+            fomc_text = "The Federal Reserve kept the target range for the federal funds rate at 3.50–3.75 percent. The Committee will continue to monitor the implications of incoming information. It is prepared to adjust the stance of monetary policy as appropriate."
             summary = summarise_text(fomc_text, current_raw, last_alerted_raw_score) if fomc_text else ""
 
             # Send to journalists (ALERT_EMAILS_2)
