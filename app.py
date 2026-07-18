@@ -605,22 +605,45 @@ Text:
     return None
 
 # ---------- FOMC SUMMARY ----------
-def summarise_text(text):
+def summarise_text(text, score, previous_score=None):
     if not text or not groq_client:
         return ""
-    prompt = f"Summarise the following Federal Reserve communication in one sentence using present tense. Return ONLY the sentence, no preamble.\n\n{text[:3000]}"
+    
+    # Calculate change if previous score is provided
+    change_str = ""
+    if previous_score is not None:
+        diff = score - previous_score
+        if abs(diff) >= 0.5:
+            direction = "higher" if diff > 0 else "lower"
+            change_str = f"moved {abs(diff):.1f} points {direction} to {score:.1f}"
+        else:
+            change_str = f"is at {score:.1f}, broadly unchanged"
+    else:
+        change_str = f"is at {score:.1f}"
+    
+    prompt = f"""
+Summarise the following Federal Reserve communication in three concise sentences.
+
+First sentence: summarise the key policy decision and tone.
+Second sentence: state where the FTN Index stands (it {change_str}) and what this reflects.
+Third sentence: state one or two key implications for markets, based on the text and the context.
+
+Keep the total response under 100 words. Return ONLY these three sentences, no preamble.
+
+Text:
+{text[:3000]}
+"""
     try:
         chat_completion = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
             model="llama-3.1-8b-instant",
             temperature=0.3,
-            max_tokens=80
+            max_tokens=120
         )
         return chat_completion.choices[0].message.content.strip()
     except Exception as e:
         logging.warning(f"Summary generation failed: {e}")
         return ""
-
 # ---------- COMBINED PIPELINE ----------
 def compute_daily_ftn():
     all_sources = []
