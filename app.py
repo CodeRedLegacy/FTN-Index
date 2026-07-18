@@ -817,7 +817,8 @@ def ping():
                 for s in sources
                 if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()
             ])
-            summary = summarise_text(fomc_text) if fomc_text else ""
+            # Generate summary with current and previous score
+            summary = summarise_text(fomc_text, current_raw, last_alerted_raw_score) if fomc_text else ""
 
             # Send to journalists (ALERT_EMAILS_2)
             send_alert(
@@ -873,8 +874,7 @@ def ping():
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({"status": "ok", "score": score, "timestamp": ts})
-last_alerted_raw_score = None
+    return jsonify({"status": "ok", "score": score, "timestamp": ts})last_alerted_raw_score = None
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
