@@ -264,7 +264,7 @@ def get_daily_average_scores(days=7):
 # ---------- FOMC SCHEDULE 2026 ----------
 FOMC_DATES = [
     "2026-01-29", "2026-03-19", "2026-05-07", "2026-06-11",
-    "2026-07-30", "2026-07-18", "2026-09-17", "2026-11-05", "2026-12-16"
+    "2026-07-30", "2026-09-17", "2026-11-05", "2026-12-16"
 ]
 
 def is_fomc_day():
@@ -823,14 +823,16 @@ def ping():
     if now_utc.hour == 0 and now_utc.minute < 10:
         fomc_alert_sent_today = False
 
-    fomc_active = is_fomc_day() and now_utc.hour >= 0 and not fomc_alert_sent_today
+    fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
 
     # --- FOMC Alert (Independent of last_alerted_raw_score) ---
     if fomc_active and current_raw > 0:
         try:
-            fomc_text = "The Federal Reserve kept the target range for the federal funds rate at 3.50–3.75 percent. The Committee will continue to monitor the implications of incoming information. It is prepared to adjust the stance of monetary policy as appropriate."
-            summary = summarise_text(fomc_text, current_raw, last_alerted_raw_score) if fomc_text else ""
-
+            fomc_text = " ".join([
+                s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000)
+                for s in sources
+                if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()
+            ])
             # Send to journalists (ALERT_EMAILS_2)
             send_alert(
                 current_raw,
