@@ -644,6 +644,7 @@ Text:
     except Exception as e:
         logging.warning(f"Summary generation failed: {e}")
         return ""
+        
 # ---------- COMBINED PIPELINE ----------
 def compute_daily_ftn():
     all_sources = []
@@ -860,7 +861,7 @@ def ping():
             logging.info(f"FOMC alert sent for score {current_raw}")
         except Exception as e:
             logging.error(f"FOMC alert failed: {e}")
-
+            
     # --- 5-Point Move Alert (Requires previous score) ---
     if last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
