@@ -727,7 +727,7 @@ def validate_alert(is_fomc, diff, current_raw, sources, summary):
         return True
 
 # ---------- ALERT SENDING HELPERS ----------
-def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalist_list=False, blocked=False):
+def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalist_list=False, blocked=False, alert_type="move"):
     global last_alert_data
     resend_api_key = os.environ.get("RESEND_API_KEY")
     if not resend_api_key:
@@ -749,20 +749,36 @@ def send_alert(current_raw, last_raw, diff, direction, summary="", use_journalis
         logging.warning("No valid recipients in alert list")
         return
 
-    subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
-    if blocked:
-        subject = f"[BLOCKED] {subject}"
+    # --- Customise subject and body based on alert type ---
+    if alert_type == "fomc":
+        subject = f"FTN Alert: FOMC Statement Released – Score {current_raw:.1f}"
+        body = f"""FTN Index – FOMC Statement Alert.
 
-    body = f"""FTN Index has moved significantly.
+Current FTN score: {current_raw:.1f}"""
+        if summary:
+            body += f"\n\n{summary}"
+        body += f"""
+
+Live dashboard: https://ftone-index.github.io/ftone-dashboard/
+Raw API: https://ftn-index.onrender.com/api/ftn_latest
+
+This is an automated alert. Unsubscribe by replying to this email."""
+    else:
+        # Standard 5‑point move alert
+        subject = f"FTN Alert: Index moved {direction} by {diff:.1f} points"
+        if blocked:
+            subject = f"[BLOCKED] {subject}"
+
+        body = f"""FTN Index has moved significantly.
 
 Previous raw score: {last_raw:.1f}
 Current raw score:  {current_raw:.1f}
 Change: {direction} by {diff:.1f} points"""
-    if summary:
-        body += f"\n\nFOMC statement summary: {summary}"
-    if blocked:
-        body += "\n\n⚠️ This alert was automatically blocked from being sent to journalists because it did not pass validation checks. It is only sent to you for review."
-    body += f"""
+        if summary:
+            body += f"\n\nFOMC statement summary: {summary}"
+        if blocked:
+            body += "\n\n⚠️ This alert was automatically blocked from being sent to journalists because it did not pass validation checks. It is only sent to you for review."
+        body += f"""
 
 Live dashboard: https://ftone-index.github.io/ftone-dashboard/
 Raw API: https://ftn-index.onrender.com/api/ftn_latest
@@ -777,7 +793,7 @@ This is an automated alert. Unsubscribe by replying to this email."""
                 "subject": subject,
                 "text": body
             })
-        logging.info(f"Alert email sent to {len(recipients)} recipients (journalist list: {use_journalist_list}, blocked: {blocked})")
+        logging.info(f"Alert email sent to {len(recipients)} recipients (journalist list: {use_journalist_list}, blocked: {blocked}, type: {alert_type})")
         last_alert_data = {
             "current_raw": current_raw,
             "last_raw": last_raw,
@@ -787,7 +803,6 @@ This is an automated alert. Unsubscribe by replying to this email."""
         }
     except Exception as e:
         logging.error(f"Failed to send alert email: {e}")
-
 last_alert_data = None
 
 # ---------- ROUTES ----------
@@ -807,7 +822,7 @@ def ping():
     if now_utc.hour == 0 and now_utc.minute < 10:
         fomc_alert_sent_today = False
 
-    fomc_active = is_fomc_day() and now_utc.hour >= 0 and not fomc_alert_sent_today
+    fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
 
     # --- FOMC Alert (Independent of last_alerted_raw_score) ---
     if fomc_active and current_raw > 0:
@@ -817,7 +832,6 @@ def ping():
                 for s in sources
                 if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()
             ])
-            # Generate summary with current and previous score
             summary = summarise_text(fomc_text, current_raw, last_alerted_raw_score) if fomc_text else ""
 
             # Send to journalists (ALERT_EMAILS_2)
@@ -828,7 +842,8 @@ def ping():
                 "unchanged",
                 summary,
                 use_journalist_list=True,
-                blocked=False
+                blocked=False,
+                alert_type="fomc"
             )
             # Send to yourself (ALERT_EMAILS)
             send_alert(
@@ -838,7 +853,8 @@ def ping():
                 "unchanged",
                 summary,
                 use_journalist_list=False,
-                blocked=False
+                blocked=False,
+                alert_type="fomc"
             )
             fomc_alert_sent_today = True
             logging.info(f"FOMC alert sent for score {current_raw}")
@@ -859,7 +875,8 @@ def ping():
                 direction,
                 "",
                 use_journalist_list=True,
-                blocked=False
+                blocked=False,
+                alert_type="move"
             )
             # Send to yourself (ALERT_EMAILS)
             send_alert(
@@ -869,13 +886,13 @@ def ping():
                 direction,
                 "",
                 use_journalist_list=False,
-                blocked=False
+                blocked=False,
+                alert_type="move"
             )
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
-    return jsonify({"status": "ok", "score": score, "timestamp": ts})
-last_alerted_raw_score = None
+    return jsonify({"status": "ok", "score": score, "timestamp": ts})last_alerted_raw_score = None
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
