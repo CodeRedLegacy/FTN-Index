@@ -780,44 +780,77 @@ def ping():
         return jsonify({"status": "error", "message": "No data"}), 500
     score, confidence, sources, current_raw = result
 
+    now_utc = datetime.datetime.utcnow()
+    if now_utc.hour == 0 and now_utc.minute < 10:
+        fomc_alert_sent_today = False
+
+    fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
+
+    # --- FOMC Alert (Independent of last_alerted_raw_score) ---
+    if fomc_active and current_raw > 0:
+        try:
+            fomc_text = " ".join([
+                s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000)
+                for s in sources
+                if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()
+            ])
+            summary = summarise_text(fomc_text) if fomc_text else ""
+
+            # Send to journalists (ALERT_EMAILS_2)
+            send_alert(
+                current_raw,
+                current_raw,
+                0,
+                "unchanged",
+                summary,
+                use_journalist_list=True,
+                blocked=False
+            )
+            # Send to yourself (ALERT_EMAILS)
+            send_alert(
+                current_raw,
+                current_raw,
+                0,
+                "unchanged",
+                summary,
+                use_journalist_list=False,
+                blocked=False
+            )
+            fomc_alert_sent_today = True
+            logging.info(f"FOMC alert sent for score {current_raw}")
+        except Exception as e:
+            logging.error(f"FOMC alert failed: {e}")
+
+    # --- 5-Point Move Alert (Requires previous score) ---
     if last_alerted_raw_score is not None:
         diff = abs(current_raw - last_alerted_raw_score)
         direction = "higher" if current_raw > last_alerted_raw_score else "lower"
 
-        now_utc = datetime.datetime.utcnow()
-        if now_utc.hour == 0 and now_utc.minute < 10:
-            fomc_alert_sent_today = False
-
-        fomc_active = is_fomc_day() and now_utc.hour >= 18 and not fomc_alert_sent_today
-
-        alert_triggered = False
-        is_fomc_alert = False
-        if fomc_active and current_raw > 0:
-            is_fomc_alert = True
-            alert_triggered = True
-        elif diff >= 5:
-            alert_triggered = True
-
-        if alert_triggered:
-            summary = ""
-            if is_fomc_alert:
-                fomc_text = " ".join([s['title'] + ". " + extract_text(fetch_soup(s['url']), max_chars=2000) for s in sources if 'fomc' in s.get('type', '').lower() or 'statement' in s.get('type', '').lower()])
-                summary = summarise_text(fomc_text) if fomc_text else ""
-
-            valid = validate_alert(is_fomc_alert, diff, current_raw, sources, summary)
-
-            if valid:
-                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=True, blocked=False)
-                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, blocked=False)
-                if is_fomc_alert:
-                    fomc_alert_sent_today = True
-            else:
-                send_alert(current_raw, last_alerted_raw_score, diff, direction, summary, use_journalist_list=False, blocked=True)
+        if diff >= 5 and not fomc_active:
+            # Send to journalists (ALERT_EMAILS_2)
+            send_alert(
+                current_raw,
+                last_alerted_raw_score,
+                diff,
+                direction,
+                "",
+                use_journalist_list=True,
+                blocked=False
+            )
+            # Send to yourself (ALERT_EMAILS)
+            send_alert(
+                current_raw,
+                last_alerted_raw_score,
+                diff,
+                direction,
+                "",
+                use_journalist_list=False,
+                blocked=False
+            )
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     return jsonify({"status": "ok", "score": score, "timestamp": ts})
-
 last_alerted_raw_score = None
 
 @app.route('/api/ftn_latest')
