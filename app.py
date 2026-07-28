@@ -839,7 +839,7 @@ def ping():
                 current_raw,
                 0,
                 "unchanged",
-                summary,
+                "",
                 use_journalist_list=True,
                 blocked=False,
                 alert_type="fomc"
@@ -850,7 +850,7 @@ def ping():
                 current_raw,
                 0,
                 "unchanged",
-                summary,
+                "",
                 use_journalist_list=False,
                 blocked=False,
                 alert_type="fomc"
