@@ -80,6 +80,43 @@ def validate_trial():
     except ValueError:
         return jsonify({"valid": False, "reason": "Invalid expiry format"}), 500
 
+# ---------- CONTACT FORM ----------
+@app.route('/contact', methods=['POST'])
+def contact_form():
+    """Receive contact form submissions from the landing page and email them via Resend."""
+    try:
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        email = data.get('email', '').strip()
+        message = data.get('message', '').strip()
+
+        if not name or not email:
+            return jsonify({"status": "error", "message": "Name and email are required."}), 400
+
+        resend_api_key = os.environ.get("RESEND_API_KEY")
+        if not resend_api_key:
+            logging.error("RESEND_API_KEY not set — contact form submission lost")
+            return jsonify({"status": "error", "message": "Server configuration error."}), 500
+
+        resend.api_key = resend_api_key
+
+        subject = f"FTN Contact: {name}"
+        body = f"Name: {name}\nEmail: {email}\n\nMessage:\n{message or '(No message provided)'}"
+
+        response = resend.Emails.send({
+            "from": "FTN Contact Form <alerts@ftoneindex.com>",
+            "to": "ftone.index@gmail.com",
+            "subject": subject,
+            "text": body
+        })
+
+        logging.info(f"Contact form submission from {name} ({email}) — Resend ID: {response.get('id', 'N/A')}")
+        return jsonify({"status": "success", "message": "Thank you! We'll be in touch shortly."}), 200
+
+    except Exception as e:
+        logging.error(f"Contact form failed: {e}")
+        return jsonify({"status": "error", "message": "Something went wrong. Please email us directly at ftone.index@gmail.com"}), 500
+
 # ---------- PROSPECT OUTREACH ----------
 def generate_prospect_email(name, company):
     """Generate the prospect outreach email body."""
