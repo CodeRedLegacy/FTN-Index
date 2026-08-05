@@ -944,7 +944,36 @@ def ping():
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     return jsonify({"status": "ok", "score": score, "timestamp": ts})
+
 last_alerted_raw_score = None
+
+# ---------- PUBLIC DELAYED CACHE ----------
+_cached_ftn = None
+_cached_ftn_timestamp = None
+
+@app.route('/api/ftn_delayed')
+def ftn_delayed():
+    """Return a cached FTN score that is at least 30 minutes old (for public users)."""
+    global _cached_ftn, _cached_ftn_timestamp
+    if _cached_ftn is None:
+        return jsonify({"error": "No cached data available yet"}), 503
+
+    daily_avgs = get_daily_average_scores(days=7)
+    if len(daily_avgs) >= 7:
+        prev_smoothed = round(sum(daily_avgs[:-1]) / len(daily_avgs[:-1]), 1)
+        change = round(_cached_ftn["score"] - prev_smoothed, 1)
+    else:
+        change = 0
+
+    return jsonify({
+        "index": "F-Tone (FTN)",
+        "score": _cached_ftn["score"],
+        "raw_score": _cached_ftn["raw_score"],
+        "change": change,
+        "confidence": _cached_ftn["confidence"],
+        "sources": _cached_ftn["sources"],
+        "timestamp": _cached_ftn["timestamp"]
+    })
 
 @app.route('/api/ftn_latest')
 def ftn_latest():
