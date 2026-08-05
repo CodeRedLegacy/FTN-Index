@@ -52,6 +52,9 @@ logging.basicConfig(level=logging.INFO)
 # ---------- PUBLIC DELAYED CACHE (ROLLING BUFFER) ----------
 _delayed_buffer = deque(maxlen=6)
 
+# ---------- DOCUMENT SCORE CACHE ----------
+_doc_score_cache = {}  # {"url": score}
+
 # ---------- TRIAL KEY VALIDATION ----------
 # Valid trial keys are stored as a JSON object in the VALID_TRIAL_KEYS environment variable
 # Format: {"key1": "YYYY-MM-DD", "key2": "YYYY-MM-DD"}
