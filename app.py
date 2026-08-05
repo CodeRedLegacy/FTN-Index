@@ -687,6 +687,7 @@ Text:
         
 # ---------- COMBINED PIPELINE ----------
 def compute_daily_ftn():
+    global _doc_score_cache
     all_sources = []
     all_sources.extend(scrape_fed_speeches())
     all_sources.extend(scrape_fomc_statements())
@@ -700,18 +701,40 @@ def compute_daily_ftn():
     sources_detail = []
     for src in all_sources:
         try:
-            soup = fetch_soup(src['url'])
+            url = src['url']
+
+            # Check document cache first
+            if url in _doc_score_cache:
+                score = _doc_score_cache[url]
+                scores.append(score)
+                soup = fetch_soup(url)
+                text = extract_text(soup)
+                total_chars += len(text)
+                speaker = extract_speaker_from_url(url)
+                sources_detail.append({
+                    'type': src['type'],
+                    'title': src['title'],
+                    'url': url,
+                    'chars': len(text),
+                    'speaker': speaker
+                })
+                logging.info(f"Cached {src['type']}: {score} (from cache)")
+                continue
+
+            # Not cached — fetch and score
+            soup = fetch_soup(url)
             text = extract_text(soup)
             if text:
                 score = score_text_with_ai(text)
                 if score is not None:
+                    _doc_score_cache[url] = score  # Cache it
                     scores.append(score)
                     total_chars += len(text)
-                    speaker = extract_speaker_from_url(src['url'])
+                    speaker = extract_speaker_from_url(url)
                     sources_detail.append({
                         'type': src['type'],
                         'title': src['title'],
-                        'url': src['url'],
+                        'url': url,
                         'chars': len(text),
                         'speaker': speaker
                     })
