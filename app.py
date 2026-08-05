@@ -926,10 +926,24 @@ def ping():
                 alert_type="move"
             )
 
+    # --- Update public delayed cache (only if 30+ minutes old) ---
+    global _cached_ftn, _cached_ftn_timestamp
+    now = datetime.datetime.utcnow()
+    if _cached_ftn is None or _cached_ftn_timestamp is None or \
+       (now - _cached_ftn_timestamp).total_seconds() >= 1800:
+        _cached_ftn = {
+            "score": score,
+            "raw_score": current_raw,
+            "confidence": confidence,
+            "sources": sources,
+            "timestamp": now.isoformat() + "Z"
+        }
+        _cached_ftn_timestamp = now
+        logging.info(f"Public delayed cache updated (score: {score})")
+
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
     return jsonify({"status": "ok", "score": score, "timestamp": ts})
-
 last_alerted_raw_score = None
 
 @app.route('/api/ftn_latest')
