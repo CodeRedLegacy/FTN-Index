@@ -49,6 +49,9 @@ app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
+# ---------- PUBLIC DELAYED CACHE (ROLLING BUFFER) ----------
+_delayed_buffer = deque(maxlen=6)
+
 # ---------- TRIAL KEY VALIDATION ----------
 # Valid trial keys are stored as a JSON object in the VALID_TRIAL_KEYS environment variable
 # Format: {"key1": "YYYY-MM-DD", "key2": "YYYY-MM-DD"}
@@ -850,7 +853,7 @@ def health():
 
 @app.route('/ping')
 def ping():
-    global last_alerted_raw_score, fomc_alert_sent_today, _cached_ftn, _cached_ftn_timestamp
+    global last_alerted_raw_score, fomc_alert_sent_today, _delayed_buffer
     result = compute_daily_ftn()
     if result[0] is None:
         return jsonify({"status": "error", "message": "No data"}), 500
@@ -926,20 +929,17 @@ def ping():
                 alert_type="move"
             )
 
-    # --- Update public delayed cache (only if 30+ minutes old) ---
-    global _cached_ftn, _cached_ftn_timestamp
+    # --- Update rolling delayed buffer ---
     now = datetime.datetime.utcnow()
-    if _cached_ftn is None or _cached_ftn_timestamp is None or \
-       (now - _cached_ftn_timestamp).total_seconds() >= 1800:
-        _cached_ftn = {
-            "score": score,
-            "raw_score": current_raw,
-            "confidence": confidence,
-            "sources": sources,
-            "timestamp": now.isoformat() + "Z"
-        }
-        _cached_ftn_timestamp = now
-        logging.info(f"Public delayed cache updated (score: {score})")
+    _delayed_buffer.append({
+        "score": score,
+        "raw_score": current_raw,
+        "confidence": confidence,
+        "sources": sources,
+        "timestamp": now.isoformat() + "Z",
+        "stored_at": now
+    })
+    logging.info(f"Delayed buffer updated. Buffer size: {len(_delayed_buffer)}")
 
     last_alerted_raw_score = current_raw
     ts = datetime.datetime.utcnow().isoformat() + "Z"
@@ -947,32 +947,45 @@ def ping():
 
 last_alerted_raw_score = None
 
-# ---------- PUBLIC DELAYED CACHE ----------
-_cached_ftn = None
-_cached_ftn_timestamp = None
-
 @app.route('/api/ftn_delayed')
 def ftn_delayed():
-    """Return a cached FTN score that is at least 30 minutes old (for public users)."""
-    global _cached_ftn, _cached_ftn_timestamp
-    if _cached_ftn is None:
+    """Return a cached FTN score approximately 30 minutes old (for public users)."""
+    global _delayed_buffer
+    if len(_delayed_buffer) == 0:
         return jsonify({"error": "No cached data available yet"}), 503
+
+    now = datetime.datetime.utcnow()
+    target_age = datetime.timedelta(minutes=30)
+
+    # Find the score closest to 30 minutes old
+    best_entry = None
+    best_diff = None
+    for entry in _delayed_buffer:
+        age = now - entry["stored_at"]
+        diff = abs((age - target_age).total_seconds())
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best_entry = entry
+
+    # If buffer isn't full yet, return the oldest available
+    if len(_delayed_buffer) < 6:
+        best_entry = _delayed_buffer[0]
 
     daily_avgs = get_daily_average_scores(days=7)
     if len(daily_avgs) >= 7:
         prev_smoothed = round(sum(daily_avgs[:-1]) / len(daily_avgs[:-1]), 1)
-        change = round(_cached_ftn["score"] - prev_smoothed, 1)
+        change = round(best_entry["score"] - prev_smoothed, 1)
     else:
         change = 0
 
     return jsonify({
         "index": "F-Tone (FTN)",
-        "score": _cached_ftn["score"],
-        "raw_score": _cached_ftn["raw_score"],
+        "score": best_entry["score"],
+        "raw_score": best_entry["raw_score"],
         "change": change,
-        "confidence": _cached_ftn["confidence"],
-        "sources": _cached_ftn["sources"],
-        "timestamp": _cached_ftn["timestamp"]
+        "confidence": best_entry["confidence"],
+        "sources": best_entry["sources"],
+        "timestamp": best_entry["timestamp"]
     })
 
 @app.route('/api/ftn_latest')
