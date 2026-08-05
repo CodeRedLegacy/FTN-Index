@@ -850,7 +850,7 @@ def health():
 
 @app.route('/ping')
 def ping():
-    global last_alerted_raw_score, fomc_alert_sent_today
+    global last_alerted_raw_score, fomc_alert_sent_today, _cached_ftn, _cached_ftn_timestamp
     result = compute_daily_ftn()
     if result[0] is None:
         return jsonify({"status": "error", "message": "No data"}), 500
