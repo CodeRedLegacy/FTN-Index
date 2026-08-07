@@ -598,7 +598,43 @@ Text:
                 logging.info(f"AI score (Gemini-3): {score}")
                 return max(0, min(100, score))
         except Exception as e:
-            logging.warning(f"Gemini-3 failed ({e}), falling back to DeepSeek...")
+            logging.warning(f"Gemini-3 failed ({e}), falling back to Gemini-4...")
+
+    if GEMINI_KEY_4:
+        try:
+            gemini_client = genai.Client(api_key=GEMINI_KEY_4)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={"temperature": 0, "max_output_tokens": 5}
+            )
+            score_str = response.text.strip()
+            digits = re.findall(r'\d+', score_str)
+            if digits:
+                score = int(digits[0])
+                logging.info(f"AI score (Gemini-4): {score}")
+                return max(0, min(100, score))
+        except Exception as e:
+            logging.warning(f"Gemini-4 failed ({e}), falling back to Gemini-5...")
+
+    if GEMINI_KEY_5:
+        try:
+            gemini_client = genai.Client(api_key=GEMINI_KEY_5)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={"temperature": 0, "max_output_tokens": 5}
+            )
+            score_str = response.text.strip()
+            digits = re.findall(r'\d+', score_str)
+            if digits:
+                score = int(digits[0])
+                logging.info(f"AI score (Gemini-5): {score}")
+                return max(0, min(100, score))
+        except Exception as e:
+            logging.warning(f"Gemini-5 failed ({e}), falling back to DeepSeek...")
+    
+    # Tier 5: DeepSeek
     
     # Tier 5: DeepSeek
     if DEEPSEEK_API_KEY and DEEPSEEK_API_KEY.strip():
