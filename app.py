@@ -552,6 +552,9 @@ You are a Federal Reserve communication analyzer. Rate the following text on a s
 Text:
 {text[:3000]}
 """
+
+    rate_limit_wait()
+    
     if groq_client:
         try:
             chat_completion = groq_client.chat.completions.create(
