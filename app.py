@@ -528,6 +528,21 @@ def scrape_fed_blogs():
         return []
 
 # ---------- AI SCORING ----------
+def rate_limit_wait(max_calls_per_minute=25):
+    """Sleep if we've made too many AI calls in the last 60 seconds."""
+    now = time.time()
+    # Remove timestamps older than 60 seconds
+    while _ai_call_timestamps and _ai_call_timestamps[0] < now - 60:
+        _ai_call_timestamps.popleft()
+
+    if len(_ai_call_timestamps) >= max_calls_per_minute:
+        # Wait until the oldest call exits the 60-second window
+        wait_sec = _ai_call_timestamps[0] + 60 - now + 1   # +1 second safety
+        if wait_sec > 0:
+            logging.info(f"Rate limiting: {len(_ai_call_timestamps)} calls in last 60s, waiting {wait_sec:.1f}s")
+            time.sleep(wait_sec)
+
+    _ai_call_timestamps.append(time.time())
 def score_text_with_ai(text):
     if not text:
         return None
