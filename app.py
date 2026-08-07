@@ -39,6 +39,8 @@ from google import genai
 GEMINI_KEY_1 = os.environ.get("GEMINI_API_KEY_1")
 GEMINI_KEY_2 = os.environ.get("GEMINI_API_KEY_2")
 GEMINI_KEY_3 = os.environ.get("GEMINI_API_KEY_3")
+GEMINI_KEY_4 = os.environ.get("GEMINI_API_KEY_4")
+GEMINI_KEY_5 = os.environ.get("GEMINI_API_KEY_5")
 
 # ---------- ADDITIONAL AI PROVIDERS ----------
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
