@@ -5,6 +5,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import datetime
 from collections import deque
+import time
 import re
 import logging
 import tweepy
@@ -53,6 +54,7 @@ logging.basicConfig(level=logging.INFO)
 
 # ---------- PUBLIC DELAYED CACHE (ROLLING BUFFER) ----------
 _delayed_buffer = deque(maxlen=6)
+_ai_call_timestamps = deque(maxlen=200)   # tracks AI call times for rate limiting
 
 # ---------- DOCUMENT SCORE CACHE ----------
 _doc_score_cache = {}  # {"url": score}
